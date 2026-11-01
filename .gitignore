@@ -133,3 +133,8 @@ dmypy.json
 gui_state.json
 config.yaml.bak
 .gui-check-*.yaml
+
+# Desktop build
+/build/
+/dist/
+smoke-result.json

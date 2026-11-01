@@ -18,6 +18,20 @@ The sync engine (`src/`) is unchanged from upstream, so matching, mappings and r
 
 Every save is validated with the real settings loader first, and the previous file is kept as `config.yaml.bak`.
 
+### Windows app (Windows 10/11)
+
+Download the latest **JellyPlex-Watched-Setup-x.y.z.exe** from the
+[Releases page](https://github.com/rivarob04/plextojellyfinwatched/releases) and run it.
+No Python or Docker needed; it installs per-user (no admin prompt) and adds a Start menu shortcut.
+A portable `.zip` is also available: unzip anywhere and run `JellyPlex-Watched.exe`.
+
+- The app opens in its own window (Microsoft Edge WebView2, included with Windows 11 and current Windows 10). Without WebView2 it opens in your default browser instead.
+- Config, logs, marked items and run history live in `%APPDATA%\JellyPlex-Watched` (Start menu → *Open config folder*). Uninstalling keeps them.
+- Windows SmartScreen may warn on first launch because the app isn't code-signed: click **More info → Run anyway**.
+- The schedule runs only while the app window is open.
+
+Every push to `main` also builds the app as a workflow artifact (Actions → *Windows app*); tagging `vX.Y.Z` publishes a release.
+
 ### Run it locally
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).

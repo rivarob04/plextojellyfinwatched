@@ -144,6 +144,10 @@ def cmd_run(config: str, dryrun: str | None) -> int:
 
 
 def main() -> int:
+    # Windows consoles/pipes default to a legacy code page; the GUI reads UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     parser = argparse.ArgumentParser(prog="gui.worker")
     parser.add_argument("command", choices=["validate", "test", "run"])
     parser.add_argument("--config", required=True)

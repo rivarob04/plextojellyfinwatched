@@ -24,6 +24,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parent.parent
+FROZEN = getattr(sys, "frozen", False)
+# Directory the sync engine runs in (relative log/mark paths resolve here).
+WORK_DIR = Path(os.environ.get("GUI_WORK_DIR", ROOT)).resolve()
+# Hide the console window of child processes on Windows.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 STATIC = Path(__file__).resolve().parent / "static"
 
 CONFIG_PATH = Path(os.environ.get("YAML_FILE", "config.yaml")).resolve()
@@ -128,6 +133,13 @@ def normalise_servers(data: dict) -> dict:
 # Worker subprocesses
 # --------------------------------------------------------------------------
 def worker_cmd(*args: str) -> list[str]:
+    if FROZEN:
+        # Packaged Windows app: a separate console-mode worker executable
+        # sits next to the GUI executable.
+        exe = Path(sys.executable).with_name(
+            "jpw-worker.exe" if os.name == "nt" else "jpw-worker"
+        )
+        return [str(exe), *args]
     return [sys.executable, "-u", "-m", "gui.worker", *args]
 
 
@@ -146,9 +158,12 @@ def run_worker_json(command: str, data: dict | None, timeout: int = 600) -> dict
     try:
         proc = subprocess.run(
             worker_cmd(command, "--config", str(path)),
-            cwd=ROOT,
+            cwd=WORK_DIR,
             capture_output=True,
+            creationflags=NO_WINDOW,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             env=_child_env(),
         )
@@ -171,6 +186,12 @@ def run_worker_json(command: str, data: dict | None, timeout: int = 600) -> dict
 def _child_env() -> dict:
     env = dict(os.environ)
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    if not FROZEN:
+        # The worker may run from the data folder, so point Python at the code.
+        env["PYTHONPATH"] = os.pathsep.join(
+            p for p in (str(ROOT), env.get("PYTHONPATH", "")) if p
+        )
     env.pop("YAML_FILE", None)  # the worker always gets --config explicitly
     return env
 
@@ -238,10 +259,13 @@ class Runner:
             }
             self.proc = subprocess.Popen(
                 worker_cmd(*args),
-                cwd=ROOT,
+                cwd=WORK_DIR,
+                creationflags=NO_WINDOW,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 env=_child_env(),
             )
@@ -453,7 +477,7 @@ def marks(limit: int = 500):
     data, _, _ = read_config()
     mark = Path(data.get("mark_file") or "mark.log")
     if not mark.is_absolute():
-        mark = ROOT / mark
+        mark = WORK_DIR / mark
     if not mark.exists():
         return {"path": str(mark), "lines": []}
     with mark.open(encoding="utf-8", errors="replace") as fh:
