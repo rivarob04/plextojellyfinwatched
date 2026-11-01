@@ -138,3 +138,4 @@ config.yaml.bak
 /build/
 /dist/
 smoke-result.json
+!packaging/windows/jellyplex-watched.spec
