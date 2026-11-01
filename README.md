@@ -30,7 +30,7 @@ A portable `.zip` is also available: unzip anywhere and run `JellyPlex-Watched.e
 - Windows SmartScreen may warn on first launch because the app isn't code-signed: click **More info → Run anyway**.
 - The schedule runs only while the app window is open.
 
-Every push to `main` also builds the app as a workflow artifact (Actions → *Windows app*); tagging `vX.Y.Z` publishes a release.
+Every push to `main` rebuilds the app and publishes it to the release named in `packaging/windows/VERSION`; bump that file to cut a new release.
 
 ### Run it locally
 
