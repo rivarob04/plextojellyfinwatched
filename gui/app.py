@@ -23,6 +23,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from gui import notify
+
 ROOT = Path(__file__).resolve().parent.parent
 FROZEN = getattr(sys, "frozen", False)
 # Directory the sync engine runs in (relative log/mark paths resolve here).
@@ -36,6 +38,9 @@ STATE_PATH = Path(
     os.environ.get("GUI_STATE_FILE", CONFIG_PATH.parent / "gui_state.json")
 ).resolve()
 DISCOVERY_PATH = STATE_PATH.with_name("gui_discovery.json")
+RUNS_DIR = STATE_PATH.with_name("gui_runs")
+CHANGE_PREFIX = "@@JPW-CHANGE@@ "
+DESKTOP = os.environ.get("GUI_DESKTOP") == "1"
 GUI_PASSWORD = os.environ.get("GUI_PASSWORD", "")
 # In Docker, keep logs next to the config so they survive container updates.
 DATA_DIR = os.environ.get("GUI_DATA_DIR", "").rstrip("/")
@@ -200,6 +205,39 @@ def _child_env() -> dict:
 # --------------------------------------------------------------------------
 # Sync runner + scheduler
 # --------------------------------------------------------------------------
+def summarize(changes: list[dict]) -> dict:
+    """Totals per user + destination server, for the preview and notifications."""
+    groups: dict[tuple[str, str], dict] = {}
+    for c in changes:
+        key = (c.get("user") or "?", c.get("server") or "?")
+        row = groups.setdefault(
+            key, {"user": key[0], "server": key[1], "watched": 0, "partial": 0, "libraries": set()}
+        )
+        row["partial" if c.get("kind") == "partial" else "watched"] += 1
+        row["libraries"].add(c.get("library") or "?")
+    rows = sorted(groups.values(), key=lambda r: -(r["watched"] + r["partial"]))
+    for row in rows:
+        row["libraries"] = sorted(row["libraries"])
+    return {
+        "total": len(changes),
+        "watched": sum(r["watched"] for r in rows),
+        "partial": sum(r["partial"] for r in rows),
+        "by_user": rows,
+    }
+
+
+def save_run(run: dict, changes: list[dict]) -> None:
+    try:
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        (RUNS_DIR / f"{run['id']}.json").write_text(
+            json.dumps({"run": run, "changes": changes}, ensure_ascii=False), encoding="utf-8"
+        )
+        for old in sorted(RUNS_DIR.glob("*.json"))[:-30]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 class Runner:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -209,6 +247,9 @@ class Runner:
         self.current: dict | None = None
         self.history: list[dict] = []
         self.schedule = {"enabled": False, "interval_minutes": 60, "dryrun": True}
+        self.notifications: dict = notify.settings_with_defaults(None)
+        self.extra: dict = {}  # other GUI preferences (plex client id, desktop opts…)
+        self.changes: list[dict] = []
         self.next_run: float | None = None
         self._load_state()
         self._reschedule()
@@ -220,6 +261,8 @@ class Runner:
             state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
             self.schedule.update(state.get("schedule", {}))
             self.history = state.get("history", [])[-50:]
+            self.notifications = notify.settings_with_defaults(state.get("notifications"))
+            self.extra = state.get("extra", {})
         except (OSError, ValueError):
             pass
 
@@ -227,7 +270,14 @@ class Runner:
         try:
             STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
             STATE_PATH.write_text(
-                json.dumps({"schedule": self.schedule, "history": self.history[-50:]}),
+                json.dumps(
+                    {
+                        "schedule": self.schedule,
+                        "history": self.history[-50:],
+                        "notifications": self.notifications,
+                        "extra": self.extra,
+                    }
+                ),
                 encoding="utf-8",
             )
         except OSError:
@@ -258,6 +308,7 @@ class Runner:
                 "errors": 0,
                 "marked": 0,
             }
+            self.changes = []
             self.proc = subprocess.Popen(
                 worker_cmd(*args),
                 cwd=WORK_DIR,
@@ -278,23 +329,50 @@ class Runner:
         for line in proc.stdout:
             line = line.rstrip("\n")
             with self.lock:
-                self.lines.append(line)
-                if self.current:
-                    if "| ERROR" in line or "Startup error" in line:
-                        self.current["errors"] += 1
-                    if "Marked" in line or "marked" in line:
+                if line.startswith(CHANGE_PREFIX):
+                    try:
+                        change = json.loads(line[len(CHANGE_PREFIX):])
+                    except ValueError:
+                        continue
+                    if len(self.changes) < 50000:
+                        self.changes.append(change)
+                    if self.current:
                         self.current["marked"] += 1
+                        if self.current.get("dryrun") is None:
+                            self.current["dryrun"] = change.get("dryrun")
+                    continue
+                self.lines.append(line)
+                if self.current and ("| ERROR" in line or "Startup error" in line):
+                    self.current["errors"] += 1
         code = proc.wait()
         with self.lock:
-            if self.current:
-                if self.current["status"] == "stopping":
-                    self.current["status"] = "stopped"
-                else:
-                    self.current["status"] = "success" if code == 0 else "failed"
-                self.current["finished"] = datetime.now().isoformat(timespec="seconds")
-                self.current["exit_code"] = code
-                self.history.append(dict(self.current))
-                self._save_state()
+            if not self.current:
+                return
+            if self.current["status"] == "stopping":
+                self.current["status"] = "stopped"
+            else:
+                self.current["status"] = "success" if code == 0 else "failed"
+            finished = datetime.now()
+            self.current["finished"] = finished.isoformat(timespec="seconds")
+            self.current["exit_code"] = code
+            secs = int((finished - datetime.fromisoformat(self.current["started"])).total_seconds())
+            self.current["duration"] = f"{secs // 60}m {secs % 60}s" if secs >= 60 else f"{secs}s"
+            self.current["summary"] = summarize(self.changes)
+            run = dict(self.current)
+            changes = list(self.changes)
+            self.history.append(run)
+            self._save_state()
+        save_run(run, changes)
+        hook = DESKTOP_HOOKS.get("on_run_finished")
+        if hook:
+            try:
+                hook(run)
+            except Exception:  # noqa: BLE001
+                pass
+        if notify.should_notify(self.notifications, run):
+            threading.Thread(
+                target=notify.send_all, args=(self.notifications, run), daemon=True
+            ).start()
 
     def stop(self) -> None:
         with self.lock:
@@ -484,6 +562,204 @@ def stop_run():
 @app.get("/api/run")
 def run_status(offset: int = 0):
     return runner.log_since(offset)
+
+
+# ---- run results -----------------------------------------------------------
+@app.get("/api/run/changes")
+def run_changes(id: int | None = None):
+    with runner.lock:
+        if runner.current and runner.current.get("status") in ("running", "stopping") and (
+            id is None or id == runner.current["id"]
+        ):
+            return {"run": dict(runner.current), "changes": list(runner.changes), "live": True}
+    files = sorted(RUNS_DIR.glob("*.json")) if RUNS_DIR.exists() else []
+    if id is not None:
+        files = [f for f in files if f.stem == str(id)]
+    if not files:
+        return {"run": None, "changes": []}
+    try:
+        return json.loads(files[-1].read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"run": None, "changes": []}
+
+
+# ---- notifications ---------------------------------------------------------
+class NotifyBody(BaseModel):
+    settings: dict
+
+
+@app.get("/api/notifications")
+def get_notifications():
+    return runner.notifications
+
+
+@app.put("/api/notifications")
+def put_notifications(body: NotifyBody):
+    runner.notifications = notify.settings_with_defaults(body.settings)
+    runner._save_state()
+    return runner.notifications
+
+
+@app.post("/api/notifications/test")
+def test_notifications(body: NotifyBody):
+    cfg = notify.settings_with_defaults(body.settings)
+    sample = {
+        "test": True,
+        "status": "success",
+        "dryrun": False,
+        "trigger": "test",
+        "duration": "0s",
+        "summary": {
+            "total": 3,
+            "by_user": [{"user": "example", "server": "Example Server", "watched": 2, "partial": 1}],
+        },
+    }
+    results = notify.send_all(cfg, sample)
+    if not results:
+        raise HTTPException(400, "No notification channel is filled in yet")
+    return results
+
+
+# ---- Plex sign-in (plex.tv PIN flow) ---------------------------------------
+PLEX_PRODUCT = "JellyPlex-Watched"
+
+
+def plex_headers(token: str | None = None) -> dict:
+    client_id = runner.extra.get("plex_client_id")
+    if not client_id:
+        client_id = runner.extra["plex_client_id"] = "jpw-" + secrets.token_hex(12)
+        runner._save_state()
+    headers = {
+        "Accept": "application/json",
+        "X-Plex-Product": PLEX_PRODUCT,
+        "X-Plex-Client-Identifier": client_id,
+        "X-Plex-Device-Name": PLEX_PRODUCT,
+    }
+    if token:
+        headers["X-Plex-Token"] = token
+    return headers
+
+
+def plex_call(method: str, url: str, **kwargs):
+    import requests
+
+    try:
+        resp = requests.request(method, url, timeout=20, **kwargs)
+    except requests.RequestException as error:
+        raise HTTPException(502, f"Could not reach plex.tv: {error}") from error
+    if resp.status_code >= 400:
+        raise HTTPException(502, f"plex.tv answered HTTP {resp.status_code}")
+    return resp.json()
+
+
+@app.post("/api/plex/pin")
+def plex_pin():
+    from urllib.parse import urlencode
+
+    headers = plex_headers()
+    pin = plex_call("POST", "https://plex.tv/api/v2/pins?strong=true", headers=headers)
+    query = urlencode(
+        {
+            "clientID": headers["X-Plex-Client-Identifier"],
+            "code": pin["code"],
+            "context[device][product]": PLEX_PRODUCT,
+        }
+    )
+    return {"id": pin["id"], "code": pin["code"], "url": f"https://app.plex.tv/auth#?{query}"}
+
+
+@app.get("/api/plex/pin/{pin_id}")
+def plex_pin_status(pin_id: int, code: str = ""):
+    pin = plex_call(
+        "GET", f"https://plex.tv/api/v2/pins/{pin_id}", headers=plex_headers(), params={"code": code}
+    )
+    token = pin.get("authToken")
+    if not token:
+        return {"done": False}
+    resources = plex_call(
+        "GET",
+        "https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=0",
+        headers=plex_headers(token),
+    )
+    servers = []
+    for res in resources:
+        if "server" not in (res.get("provides") or ""):
+            continue
+        options = []
+        for conn in res.get("connections") or []:
+            if conn.get("relay"):
+                continue
+            where = "Local" if conn.get("local") else "Remote"
+            options.append({"label": f"{where} (secure)", "url": conn.get("uri"), "local": bool(conn.get("local"))})
+            if conn.get("local") and conn.get("address") and conn.get("port"):
+                options.append(
+                    {
+                        "label": "Local (plain IP)",
+                        "url": f"http://{conn['address']}:{conn['port']}",
+                        "local": True,
+                    }
+                )
+        options.sort(key=lambda o: (not o["local"], "plain" not in o["label"]))
+        servers.append(
+            {
+                "name": res.get("name"),
+                "owned": bool(res.get("owned")),
+                "token": res.get("accessToken") or token,
+                "connections": options,
+            }
+        )
+    return {"done": True, "servers": servers}
+
+
+# ---- desktop app integration -----------------------------------------------
+# desktop.py fills these in; in Docker they stay empty.
+DESKTOP_HOOKS: dict = {}
+
+
+class OpenBody(BaseModel):
+    url: str
+
+
+@app.get("/api/info")
+def info():
+    return {"desktop": DESKTOP, "tray": "set_options" in DESKTOP_HOOKS}
+
+
+@app.post("/api/open")
+def open_url(body: OpenBody):
+    if not body.url.startswith("https://app.plex.tv/"):
+        raise HTTPException(400, "Only Plex sign-in links can be opened")
+    import webbrowser
+
+    webbrowser.open(body.url)
+    return {"ok": True}
+
+
+class DesktopBody(BaseModel):
+    close_to_tray: bool = True
+    start_with_windows: bool = False
+    start_minimized: bool = False
+
+
+@app.post("/api/desktop/show")
+def desktop_show():
+    if "show" in DESKTOP_HOOKS:
+        DESKTOP_HOOKS["show"]()
+    return {"ok": True}
+
+
+@app.get("/api/desktop")
+def get_desktop():
+    if "get_options" not in DESKTOP_HOOKS:
+        raise HTTPException(404, "Desktop options are only available in the Windows app")
+    return DESKTOP_HOOKS["get_options"]()
+
+
+@app.put("/api/desktop")
+def put_desktop(body: DesktopBody):
+    if "set_options" not in DESKTOP_HOOKS:
+        raise HTTPException(404, "Desktop options are only available in the Windows app")
+    return DESKTOP_HOOKS["set_options"](body.model_dump())
 
 
 @app.get("/api/schedule")

@@ -13,6 +13,12 @@ let lastRunning = false;
 let testResults = {};
 let discovery = {}; // server name -> { type, users: [], libraries: [{name,type}], updated }
 
+// Let render code pass null/false for "nothing here" without printing it.
+const _replaceChildren = Element.prototype.replaceChildren;
+Element.prototype.replaceChildren = function (...kids) {
+  return _replaceChildren.apply(this, kids.flat().filter((k) => k != null && k !== false));
+};
+
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const h = (tag, attrs = {}, ...kids) => {
@@ -89,7 +95,7 @@ function textField(label, value, onInput, opts = {}) {
     value: value ?? "",
     placeholder: opts.placeholder,
     autocomplete: "off",
-    oninput: (e) => { onInput(e.target.value); markDirty(); },
+    oninput: (e) => { onInput(e.target.value); if (!opts.noDirty) markDirty(); },
   });
   let control = input;
   if (opts.secret) {
@@ -114,8 +120,8 @@ function checkField(label, value, onChange) {
     h("span", {}, label));
 }
 
-function selectField(label, value, options, onChange) {
-  const sel = h("select", { onchange: (e) => { onChange(e.target.value); markDirty(); } },
+function selectField(label, value, options, onChange, opts = {}) {
+  const sel = h("select", { onchange: (e) => { onChange(e.target.value); if (!opts.noDirty) markDirty(); } },
     options.map((o) => h("option", { value: o, selected: o === value ? true : null }, o || "— choose —")));
   sel.value = value ?? "";
   return label ? h("label", { class: "field" }, label, sel) : sel;
@@ -229,6 +235,8 @@ function renderServers() {
           { suggest: others, placeholder: others.length ? "Pick a server…" : "Add another server first" })),
     );
     if (kind === "plex") {
+      card.querySelector(".server-head .row").append(
+        h("button", { class: "btn plex", onclick: () => plexSignIn(server) }, "Sign in with Plex"));
       card.append(h("details", { class: "alt", open: server.username ? true : null },
         h("summary", {}, "Sign in with a Plex account instead of a token, and SSL options"),
         h("div", { class: "server-fields" },
@@ -359,9 +367,18 @@ function renderDiscoveryBar() {
         stamps.length ? h("span", { class: "muted small" }, ` · updated ${new Date(stamps[0]).toLocaleString()}`) : "")
     : h("span", {}, "Connect to your servers to pick users and libraries from a list instead of typing them.");
   const auto = sameNameUsers();
+  const ideas = suggestMappings();
   bar.replaceChildren(h("div", { class: "row between" }, msg, btn),
     auto.length ? h("p", { class: "muted small", style: "margin:.6rem 0 0" },
-      `Already matched automatically (same name on every server): ${auto.join(", ")}`) : null);
+      `Already matched automatically (same name on every server): ${auto.join(", ")}`) : null,
+    ideas.length ? h("div", { style: "margin-top:.7rem" },
+      h("b", {}, `Suggested matches (${ideas.length})`),
+      h("span", { class: "muted small" }, " — these look like the same person under different names"),
+      ideas.map((idea) => h("div", { class: "suggest" },
+        h("b", {}, idea.canonical), h("span", { class: "arrow" }, "="),
+        h("span", { class: "grow" }, idea.aliases.map((a) => `${a.username} (${a.server})`).join("  ·  ")),
+        h("button", { class: "btn primary", onclick: () => acceptSuggestion(idea) }, "Add mapping"),
+        h("button", { class: "btn ghost", onclick: () => { dismissed.add(idea.key); saveDismissed(); renderMappings(); } }, "Not the same")))) : null);
 }
 
 /** Users whose name exists on every discovered server need no mapping. */
@@ -558,7 +575,7 @@ async function pollRun() {
         c.dryrun === false ? "Live run" : "Dry run", " · started ", new Date(c.started).toLocaleTimeString(),
         c.errors ? h("span", { class: "bad" }, ` · ${c.errors} error line${c.errors === 1 ? "" : "s"}`) : "");
     }
-    if (lastRunning && !r.running) { loadHistory(); loadMarks(); }
+    if (lastRunning && !r.running) { loadHistory(); loadMarks(); loadResults(); }
     lastRunning = r.running;
   } catch { /* server restarting */ }
   setTimeout(pollRun, lastRunning ? 1000 : 2500);
@@ -578,14 +595,17 @@ async function startRun() {
 async function loadHistory() {
   const rows = await api("/api/history").catch(() => []);
   const body = $("#history tbody");
-  body.replaceChildren(...(rows.length ? rows.slice(0, 20).map((r) => h("tr", {},
+  body.replaceChildren(...(rows.length ? rows.slice(0, 20).map((r) => h("tr", {
+      class: "clickable", title: "Show this run's results",
+      onclick: () => { loadResults(r.id); $("#results-card").scrollIntoView({ behavior: "smooth" }); } },
     h("td", {}, new Date(r.started).toLocaleString()),
     h("td", {}, r.trigger),
     h("td", {}, r.dryrun === false ? "Live" : "Dry run"),
     h("td", {}, statusPill(r.status)),
+    h("td", {}, r.summary ? String(r.summary.total) : String(r.marked ?? 0)),
     h("td", {}, String(r.errors ?? 0)),
     h("td", {}, fmtDuration(r.started, r.finished)))) :
-    [h("tr", {}, h("td", { colspan: 6, class: "empty" }, "No runs yet."))]));
+    [h("tr", {}, h("td", { colspan: 7, class: "empty" }, "No runs yet."))]));
 }
 
 async function loadSchedule() {
@@ -679,9 +699,324 @@ document.addEventListener("DOMContentLoaded", async () => {
   const start = location.hash.slice(1);
   if (start && $("#tab-" + start)) switchTab(start);
 
+  appInfo = await api("/api/info").catch(() => ({}));
   try { await loadConfig(); } catch (e) { toast("Could not load config: " + e.message, "bad"); }
   loadSchedule().catch(() => {});
+  loadResults();
+  loadNotifications();
+  $("#results-filter").addEventListener("input", renderResults);
+  $("#notify-save").addEventListener("click", saveNotifications);
+  $("#notify-test").addEventListener("click", testNotifications);
+  $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
   loadHistory();
   loadMarks();
   pollRun();
 });
+
+
+// ---------------------------------------------------------------------------
+// Shared bits for the newer features
+// ---------------------------------------------------------------------------
+let appInfo = {};
+
+function openModal(...content) {
+  const box = $("#modal .modal-box");
+  box.replaceChildren(...content);
+  $("#modal").hidden = false;
+}
+function closeModal() {
+  $("#modal").hidden = true;
+  $("#modal .modal-box").replaceChildren();
+  plexAbort = true;
+}
+
+// ---------------------------------------------------------------------------
+// 1. Sign in with Plex
+// ---------------------------------------------------------------------------
+let plexAbort = false;
+
+async function plexSignIn(server) {
+  plexAbort = false;
+  // Open the tab synchronously so pop-up blockers allow it (browser / Docker).
+  const popup = appInfo.desktop ? null : window.open("about:blank", "_blank");
+  const status = h("p", {}, h("span", { class: "spinner" }), " Waiting for you to sign in to Plex in the browser window…");
+  const linkSlot = h("p", { class: "muted small" });
+  openModal(h("h2", {}, "Sign in with Plex"), status, linkSlot,
+    h("div", { class: "modal-actions" }, h("button", { class: "btn", onclick: closeModal }, "Cancel")));
+  let pin;
+  try {
+    pin = await api("/api/plex/pin", { method: "POST" });
+  } catch (e) {
+    if (popup) popup.close();
+    status.replaceChildren(h("span", { class: "bad" }, e.message));
+    return;
+  }
+  if (appInfo.desktop) await api("/api/open", { method: "POST", body: { url: pin.url } }).catch(() => {});
+  else if (popup) popup.location = pin.url;
+  linkSlot.replaceChildren("Window didn't open? ", h("a", { href: pin.url, target: "_blank", rel: "noopener" }, "Open the Plex sign-in page"), ".");
+
+  const deadline = Date.now() + 10 * 60 * 1000;
+  while (!plexAbort && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2000));
+    if (plexAbort) return;
+    let res;
+    try { res = await api(`/api/plex/pin/${pin.id}?code=${encodeURIComponent(pin.code)}`); } catch (e) { continue; }
+    if (!res.done) continue;
+    if (popup && !popup.closed) try { popup.close(); } catch { /* ignore */ }
+    return choosePlexServer(server, res.servers);
+  }
+  if (!plexAbort) status.replaceChildren(h("span", { class: "bad" }, "Timed out waiting for Plex sign-in. Try again."));
+}
+
+function choosePlexServer(server, servers) {
+  if (!servers.length) {
+    openModal(h("h2", {}, "No Plex servers found"),
+      h("p", {}, "You're signed in, but this Plex account has no servers it can reach."),
+      h("div", { class: "modal-actions" }, h("button", { class: "btn", onclick: closeModal }, "Close")));
+    return;
+  }
+  const options = servers.flatMap((srv, si) => srv.connections.map((c, ci) => ({ srv, c, id: `${si}-${ci}` })));
+  const list = h("div", {}, servers.map((srv, si) => h("div", {},
+    h("h3", { style: "margin:.8rem 0 .2rem" }, srv.name, srv.owned ? "" : h("span", { class: "muted small" }, " · shared with you")),
+    srv.connections.length ? srv.connections.map((c, ci) => h("label", { class: "choice" },
+      h("input", { type: "radio", name: "plexconn", value: `${si}-${ci}`, checked: si === 0 && ci === 0 }),
+      h("div", {}, h("div", {}, c.label), h("div", { class: "meta" }, c.url))))
+      : h("p", { class: "muted small" }, "No direct connection available (relay only)."))));
+  openModal(h("h2", {}, "Choose your Plex server"),
+    h("p", { class: "muted" }, "Pick how this app should reach it. If it runs on the same network as Plex, a Local option is best. Use the secure address if the plain IP doesn't connect."),
+    list,
+    h("div", { class: "modal-actions" },
+      h("button", { class: "btn", onclick: closeModal }, "Cancel"),
+      h("button", { class: "btn primary", onclick: () => {
+        const picked = $("input[name=plexconn]:checked");
+        const opt = options.find((o) => o.id === picked?.value);
+        if (!opt) return;
+        server.baseurl = opt.c.url;
+        server.token = opt.srv.token;
+        delete server.username; delete server.password; delete server.servername;
+        markDirty(); closeModal(); renderAll();
+        toast(`Connected ${server.name} to “${opt.srv.name}”. Click Save, then Test connections.`, "ok");
+      } }, "Use this server")));
+}
+
+// ---------------------------------------------------------------------------
+// 2. Readable run results / dry-run preview
+// ---------------------------------------------------------------------------
+let results = { run: null, changes: [] };
+
+async function loadResults(id) {
+  results = await api("/api/run/changes" + (id ? `?id=${id}` : "")).catch(() => ({ run: null, changes: [] }));
+  renderResults();
+}
+
+function renderResults() {
+  const body = $("#results-body");
+  const run = results.run;
+  if (!run) {
+    $("#results-title").textContent = "Last run results";
+    body.replaceChildren(h("p", { class: "empty" }, "Run a sync (a dry run is safe) to see what would be marked watched."));
+    return;
+  }
+  const dry = run.dryrun !== false;
+  $("#results-title").textContent = (dry ? "Dry run preview" : "Live run results") + " · " + new Date(run.started).toLocaleString();
+  const f = $("#results-filter").value.toLowerCase();
+  const changes = results.changes.filter((c) => !f ||
+    [c.user, c.server, c.library, c.title, c.episode].some((v) => (v || "").toLowerCase().includes(f)));
+
+  const watched = results.changes.filter((c) => c.kind !== "partial").length;
+  const partial = results.changes.length - watched;
+  const verb = dry ? "Would mark" : "Marked";
+  const headline = h("div", { class: "headline" },
+    statusPill(run.status),
+    h("span", { class: "stat" }, h("b", {}, String(results.changes.length)), ` ${dry ? "would change" : "changed"}`),
+    h("span", { class: "stat" }, h("b", {}, String(watched)), " watched"),
+    h("span", { class: "stat" }, h("b", {}, String(partial)), " in progress"),
+    run.errors ? h("span", { class: "stat bad" }, h("b", {}, String(run.errors)), " errors") : null,
+    dry && results.changes.length ? h("span", { class: "muted small" }, "Nothing was changed. Untick Dry run to apply these.") : null);
+
+  if (!results.changes.length) {
+    body.replaceChildren(headline, h("p", { class: "empty" },
+      run.status === "failed" ? "The run failed before changing anything — check the live log below."
+        : "Everything is already in sync. Nothing to change."));
+    return;
+  }
+
+  // group: user -> destination server -> library -> items
+  const groups = new Map();
+  for (const c of changes) {
+    const key = `${c.user}\u0000${c.server}`;
+    if (!groups.has(key)) groups.set(key, { user: c.user, server: c.server, type: (c.server_type || "").toLowerCase(), items: [] });
+    groups.get(key).items.push(c);
+  }
+  const sorted = [...groups.values()].sort((a, b) => b.items.length - a.items.length);
+  const blocks = sorted.slice(0, 200).map((g, gi) => {
+    const libs = new Map();
+    for (const c of g.items) { if (!libs.has(c.library)) libs.set(c.library, []); libs.get(c.library).push(c); }
+    const w = g.items.filter((c) => c.kind !== "partial").length;
+    const rows = [];
+    for (const [lib, items] of libs) {
+      rows.push(h("tr", { class: "lib-head" }, h("td", { colspan: 3 }, lib || "—")));
+      for (const c of items.slice(0, 500)) rows.push(h("tr", {},
+        h("td", {}, c.title), h("td", {}, c.episode || ""),
+        h("td", {}, c.kind === "partial" ? h("span", { class: "tag" }, `resume at ${c.minutes} min`) : h("span", { class: "tag" }, "watched"))));
+      if (items.length > 500) rows.push(h("tr", {}, h("td", { colspan: 3, class: "muted" }, `…and ${items.length - 500} more`)));
+    }
+    return h("details", { class: "group", open: gi === 0 && sorted.length <= 3 ? true : null },
+      h("summary", {}, h("span", { class: `dot ${g.type}` }), h("span", { class: "who" }, g.user), h("span", { class: "muted" }, "on " + g.server),
+        h("span", { class: "counts" }, `${verb} ${w} watched${g.items.length - w ? ` · ${g.items.length - w} in progress` : ""}`)),
+      h("table", { class: "table" }, h("tbody", {}, rows)));
+  });
+  body.replaceChildren(headline, ...blocks,
+    !blocks.length ? h("p", { class: "empty" }, "No changes match the filter.") : null);
+}
+
+// ---------------------------------------------------------------------------
+// 3. Suggested user mappings
+// ---------------------------------------------------------------------------
+const NOISE = ["jellyfin", "plex", "emby", "jf", "server", "account", "user", "tv"];
+let dismissed = new Set();
+try { dismissed = new Set(JSON.parse(localStorage.getItem("jpw-dismissed") || "[]")); } catch { /* storage off */ }
+function saveDismissed() { try { localStorage.setItem("jpw-dismissed", JSON.stringify([...dismissed])); } catch { /* ignore */ } }
+
+function baseName(name) {
+  let b = name.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  let parts = b.split(" ").filter((p) => p && !NOISE.includes(p));
+  b = (parts.length ? parts : b.split(" ")).join("");
+  for (const n of NOISE) {
+    if (b.length > n.length + 2 && b.endsWith(n)) b = b.slice(0, -n.length);
+    if (b.length > n.length + 2 && b.startsWith(n)) b = b.slice(n.length);
+  }
+  return b;
+}
+
+function similarity(a, b) {
+  if (a === b) return 1;
+  const m = a.length, n = b.length;
+  if (!m || !n) return 0;
+  const d = Array.from({ length: m + 1 }, (_, i) => [i, ...Array(n).fill(0)]);
+  for (let j = 1; j <= n; j++) d[0][j] = j;
+  for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++)
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return 1 - d[m][n] / Math.max(m, n);
+}
+
+function suggestMappings() {
+  const servers = serverNames().filter((n) => discovery[n]);
+  if (servers.length < 2) return [];
+  const mapped = new Set((cfg.user_mappings || []).flatMap((m) => (m.aliases || []).map((a) => `${a.server}\u0000${(a.username || "").toLowerCase()}`)));
+  const everywhere = new Set(sameNameUsers().map((u) => u.toLowerCase()));
+  const nodes = [];
+  for (const server of servers) for (const user of usersOf(server)) {
+    if (mapped.has(`${server}\u0000${user.toLowerCase()}`) || everywhere.has(user.toLowerCase())) continue;
+    nodes.push({ server, user, base: baseName(user) });
+  }
+  // union-find over likely-same pairs on different servers
+  const parent = nodes.map((_, i) => i);
+  const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
+    const a = nodes[i], b = nodes[j];
+    if (a.server === b.server || a.user.toLowerCase() === b.user.toLowerCase()) continue;
+    const short = a.base.length <= b.base.length ? a.base : b.base;
+    const long = short === a.base ? b.base : a.base;
+    const close = a.base === b.base
+      || (short.length >= 3 && long.startsWith(short) && long.length - short.length <= 4)
+      || (short.length >= 4 && similarity(a.base, b.base) >= 0.8);
+    if (close) parent[find(i)] = find(j);
+  }
+  const clusters = new Map();
+  nodes.forEach((n, i) => { const r = find(i); if (!clusters.has(r)) clusters.set(r, []); clusters.get(r).push(n); });
+  const ideas = [];
+  for (const group of clusters.values()) {
+    const perServer = new Set(group.map((g) => g.server));
+    if (perServer.size < 2 || group.length > 6) continue;
+    const key = group.map((g) => `${g.server}:${g.user}`).sort().join("|");
+    if (dismissed.has(key)) continue;
+    const canonical = group.map((g) => g.base).sort((a, b) => a.length - b.length)[0] || group[0].user.toLowerCase();
+    ideas.push({ key, canonical, aliases: group.map((g) => ({ server: g.server, username: g.user })) });
+  }
+  return ideas.slice(0, 20);
+}
+
+function acceptSuggestion(idea) {
+  const maps = (cfg.user_mappings = cfg.user_mappings || []);
+  const existing = maps.find((m) => (m.canonical || "").toLowerCase() === idea.canonical);
+  if (existing) existing.aliases.push(...idea.aliases);
+  else maps.push({ canonical: idea.canonical, aliases: idea.aliases.map((a) => ({ ...a })) });
+  markDirty(); renderMappings(); renderRules();
+  toast(`Added mapping for “${idea.canonical}”. Remember to Save.`, "ok");
+}
+
+// ---------------------------------------------------------------------------
+// 4. Notifications (+ 5. Windows app options)
+// ---------------------------------------------------------------------------
+let notifyCfg = {};
+
+async function loadNotifications() {
+  notifyCfg = await api("/api/notifications").catch(() => ({}));
+  renderNotifications();
+  if (appInfo.desktop && appInfo.tray) {
+    try { renderDesktop(await api("/api/desktop")); } catch { /* not available */ }
+  }
+}
+
+function renderNotifications() {
+  const n = notifyCfg;
+  const set = (k) => (v) => { n[k] = v; };
+  const chk = (label, k) => h("label", { class: "switch-row compact" },
+    h("input", { type: "checkbox", checked: !!n[k], onchange: (e) => { n[k] = e.target.checked; } }), h("span", {}, label));
+  const txt = (label, k, opts = {}) => textField(label, n[k], set(k), { ...opts, noDirty: true });
+  $("#notify-when").replaceChildren(
+    chk("A sync fails or is stopped", "on_failure"),
+    chk("A live sync marks something watched", "on_changes"),
+    chk("Every finished sync, even with no changes", "on_success"),
+    chk("Include dry runs", "include_dryrun"));
+  $("#notify-discord").replaceChildren(txt("Webhook URL", "discord_webhook", { placeholder: "https://discord.com/api/webhooks/…", secret: true }));
+  $("#notify-ntfy").replaceChildren(
+    txt("Topic URL", "ntfy_url", { placeholder: "https://ntfy.sh/my-secret-topic" }),
+    txt("Access token (optional)", "ntfy_token", { secret: true, hint: "Only for protected topics or self-hosted servers" }));
+  $("#notify-webhook").replaceChildren(txt("URL", "webhook_url", { placeholder: "https://…" }));
+  $("#notify-email").replaceChildren(
+    h("div", { class: "server-fields" },
+      txt("SMTP server", "smtp_host", { placeholder: "smtp.gmail.com" }),
+      numberField("Port", n.smtp_port ?? 587, set("smtp_port"), { noDirty: true }),
+      selectField("Security", n.smtp_security || "starttls", ["starttls", "ssl", "none"], set("smtp_security"), { noDirty: true }),
+      txt("Username", "smtp_user"),
+      txt("Password", "smtp_password", { secret: true }),
+      txt("From", "email_from", { placeholder: "defaults to username" }),
+      txt("To", "email_to", { placeholder: "you@example.com" })));
+}
+
+async function saveNotifications() {
+  try {
+    notifyCfg = await api("/api/notifications", { method: "PUT", body: { settings: notifyCfg } });
+    $("#notify-result").replaceChildren(h("span", { class: "ok" }, "Saved ✓"));
+  } catch (e) { $("#notify-result").replaceChildren(h("span", { class: "bad" }, e.message)); }
+}
+
+async function testNotifications() {
+  const out = $("#notify-result");
+  out.replaceChildren(h("span", { class: "spinner" }), " Sending…");
+  try {
+    const r = await api("/api/notifications/test", { method: "POST", body: { settings: notifyCfg } });
+    out.replaceChildren(...Object.entries(r).map(([k, v]) =>
+      h("span", { class: v === "ok" ? "ok" : "bad", style: "margin-right:.8rem" }, `${k}: ${v === "ok" ? "sent ✓" : v}`)));
+  } catch (e) { out.replaceChildren(h("span", { class: "bad" }, e.message)); }
+}
+
+function renderDesktop(opts) {
+  $("#desktop-card").hidden = false;
+  const save = async (patch) => {
+    try { renderDesktop(await api("/api/desktop", { method: "PUT", body: { ...opts, ...patch } })); toast("Saved ✓", "ok"); }
+    catch (e) { toast(e.message, "bad"); }
+  };
+  const row = (label, k, hint) => h("div", {},
+    h("label", { class: "switch-row compact" },
+      h("input", { type: "checkbox", checked: !!opts[k], onchange: (e) => save({ [k]: e.target.checked }) }), h("span", {}, label)),
+    hint ? h("p", { class: "muted small", style: "margin:.2rem 0 0 1.7rem" }, hint) : null);
+  $("#desktop-opts").replaceChildren(
+    row("Keep running in the system tray when the window is closed", "close_to_tray",
+      "Scheduled syncs keep running. Quit from the tray icon (bottom-right, near the clock)."),
+    opts.autostart_supported ? row("Start with Windows", "start_with_windows", "Starts hidden in the tray when you sign in.") : null,
+    row("Start minimized to the tray", "start_minimized"));
+}

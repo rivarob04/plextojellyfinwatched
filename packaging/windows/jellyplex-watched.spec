@@ -18,7 +18,7 @@ common_hidden = (
     collect_submodules("src")
     + collect_submodules("plexapi")
     + collect_submodules("pydantic_settings")
-    + ["main", "gui", "gui.app", "gui.worker"]
+    + ["main", "gui", "gui.app", "gui.worker", "gui.notify"]
 )
 datas = [(os.path.join(ROOT, "gui", "static"), os.path.join("gui", "static"))]
 
@@ -28,7 +28,9 @@ app_a = Analysis(
     datas=datas,
     hiddenimports=common_hidden
     + collect_submodules("uvicorn")
-    + collect_submodules("webview"),
+    + collect_submodules("webview")
+    + collect_submodules("pystray")
+    + ["PIL.Image", "PIL.ImageDraw"],
     excludes=["tkinter", "pytest"],
 )
 worker_a = Analysis(

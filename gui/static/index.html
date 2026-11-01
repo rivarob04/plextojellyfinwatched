@@ -29,6 +29,7 @@
     <button role="tab" data-tab="settings">Settings &amp; Filters</button>
     <button role="tab" data-tab="mappings">Mappings</button>
     <button role="tab" data-tab="rules">Sync Rules</button>
+    <button role="tab" data-tab="notify">Notifications</button>
     <button role="tab" data-tab="yaml">YAML</button>
     <button role="tab" data-tab="marks">Marked</button>
   </nav>
@@ -72,6 +73,14 @@
         </div>
       </div>
 
+      <div class="card" id="results-card">
+        <div class="row between">
+          <h2 id="results-title">Last run results</h2>
+          <input type="search" id="results-filter" placeholder="Filter by user, title…">
+        </div>
+        <div id="results-body"><p class="empty">Run a sync (a dry run is safe) to see what would be marked watched.</p></div>
+      </div>
+
       <div class="card">
         <div class="row between">
           <h2>Servers</h2>
@@ -94,7 +103,7 @@
       <div class="card">
         <h2>Recent runs</h2>
         <table class="table" id="history"><thead><tr>
-          <th>Started</th><th>Trigger</th><th>Mode</th><th>Status</th><th>Errors</th><th>Duration</th>
+          <th>Started</th><th>Trigger</th><th>Mode</th><th>Status</th><th>Changes</th><th>Errors</th><th>Duration</th>
         </tr></thead><tbody></tbody></table>
       </div>
     </section>
@@ -162,6 +171,29 @@
       </div>
     </section>
 
+    <!-- NOTIFICATIONS -->
+    <section id="tab-notify" class="tab">
+      <div class="card">
+        <h2>When to notify</h2>
+        <div id="notify-when" class="form" style="margin-top:.8rem"></div>
+      </div>
+      <div class="grid-2 notify-grid">
+        <div class="card"><h2>Discord</h2><p class="muted">Server Settings → Integrations → Webhooks → New Webhook → Copy URL.</p><div id="notify-discord" class="form"></div></div>
+        <div class="card"><h2>ntfy</h2><p class="muted">Push to your phone with the free <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> app. Use a hard-to-guess topic name.</p><div id="notify-ntfy" class="form"></div></div>
+        <div class="card"><h2>Email</h2><p class="muted">Gmail needs an <i>app password</i> (Google Account → Security).</p><div id="notify-email" class="form"></div></div>
+        <div class="card"><h2>Webhook</h2><p class="muted">POSTs JSON (title, message, level, run) to any URL — Home Assistant, Gotify bridges, n8n…</p><div id="notify-webhook" class="form"></div></div>
+      </div>
+      <div class="row gap" style="margin-bottom:1rem">
+        <button class="btn primary" id="notify-save">Save notifications</button>
+        <button class="btn" id="notify-test">Send test</button>
+        <span id="notify-result" class="small"></span>
+      </div>
+      <div class="card" id="desktop-card" hidden>
+        <h2>Windows app</h2>
+        <div id="desktop-opts" class="form" style="margin-top:.8rem"></div>
+      </div>
+    </section>
+
     <!-- YAML -->
     <section id="tab-yaml" class="tab">
       <div class="card">
@@ -193,6 +225,7 @@
     </section>
   </main>
 
+  <div id="modal" class="modal" hidden><div class="modal-box" role="dialog" aria-modal="true"></div></div>
   <div id="toast" class="toast" hidden></div>
   <script src="/static/app.js"></script>
 </body>

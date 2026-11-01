@@ -167,6 +167,46 @@ def cmd_test(config: str) -> int:
     return 0
 
 
+CHANGE_PREFIX = "@@JPW-CHANGE@@ "
+
+
+def _capture_changes(dryrun: bool) -> None:
+    """Report every item the engine marks (or would mark) to the GUI.
+
+    The engine calls log_marked() once per changed item in both dry and live
+    runs. We wrap it so each change is also printed as one JSON line the GUI
+    turns into the preview table. On dry runs the mark file is left alone so
+    it only ever lists real changes.
+    """
+    import src.functions
+    import src.jellyfin_emby
+    import src.plex
+
+    original = src.functions.log_marked
+
+    def wrapped(server_type, server_name, username, library, movie_show,
+                episode=None, duration=None, mark_file=None, **kwargs):
+        event = {
+            "server_type": server_type,
+            "server": server_name,
+            "user": username,
+            "library": library,
+            "title": movie_show,
+            "episode": episode,
+            "minutes": round(duration / 60_000) if duration else None,
+            "kind": "partial" if duration else "watched",
+            "dryrun": dryrun,
+        }
+        print(CHANGE_PREFIX + json.dumps(event, ensure_ascii=False), flush=True)
+        if not dryrun:
+            extra = {"mark_file": mark_file} if mark_file is not None else {}
+            original(server_type, server_name, username, library, movie_show,
+                     episode, duration, **extra, **kwargs)
+
+    for module in (src.plex, src.jellyfin_emby):
+        module.log_marked = wrapped
+
+
 def cmd_run(config: str, dryrun: str | None) -> int:
     from loguru import logger
 
@@ -185,6 +225,7 @@ def cmd_run(config: str, dryrun: str | None) -> int:
     settings = settings.model_copy(update=update)
 
     configure_logger(settings.log_file, settings.debug_level)
+    _capture_changes(settings.dryrun)
     try:
         main_loop(settings, 100.0)
     except Exception as error:  # noqa: BLE001

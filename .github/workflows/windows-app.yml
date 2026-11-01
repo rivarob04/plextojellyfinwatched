@@ -35,7 +35,7 @@ jobs:
         run: |
           uv venv --python 3.13 .venv
           uv sync --frozen --no-dev
-          uv pip install pyinstaller pywebview
+          uv pip install pyinstaller pywebview pystray pillow
 
       - name: Build app
         run: .venv\Scripts\pyinstaller.exe --noconfirm packaging\windows\jellyplex-watched.spec

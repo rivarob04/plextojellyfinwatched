@@ -8,11 +8,12 @@ The sync engine (`src/`) is unchanged from upstream, so matching, mappings and r
 
 | Tab | What you can do |
 | --- | --- |
-| **Dashboard** | Start a sync (dry run or live), stop it, watch the live colour-coded log, see recent runs, test every server connection, and turn on a repeating schedule |
-| **Servers** | Add/remove Plex, Jellyfin and Emby servers, and tick a **sync-direction grid** (row pushes to column) for one-way or two-way sync |
+| **Dashboard** | Start a sync (dry run or live), see a **readable results table** (who gets what marked, per server and library), the live log, run history, connection tests, and a repeating schedule |
+| **Servers** | Add Plex, Jellyfin and Emby servers — **Sign in with Plex** instead of hunting for a token — and tick a **sync-direction grid** for one- or two-way sync |
 | **Settings & Filters** | Dry-run default, log level, threads, timeouts, GUID/path matching, and user / library / library-type white- and blacklists |
-| **Mappings** | Link the same person or library when names differ between servers |
+| **Mappings** | Pick each server's real users and libraries from **dropdowns**, with **suggested matches** for people who have different names on different servers |
 | **Sync Rules** | Per-user and per-library direction overrides |
+| **Notifications** | Discord, ntfy, email or any webhook when a sync fails or marks things watched (plus Windows app tray options) |
 | **YAML** | Edit the raw `config.yaml` directly — form and file stay interchangeable |
 | **Marked** | Searchable list of every item that has been marked watched |
 
@@ -28,7 +29,7 @@ A portable `.zip` is also available: unzip anywhere and run `JellyPlex-Watched.e
 - The app opens in its own window (Microsoft Edge WebView2, included with Windows 11 and current Windows 10). Without WebView2 it opens in your default browser instead.
 - Config, logs, marked items and run history live in `%APPDATA%\JellyPlex-Watched` (Start menu → *Open config folder*). Uninstalling keeps them.
 - Windows SmartScreen may warn on first launch because the app isn't code-signed: click **More info → Run anyway**.
-- The schedule runs only while the app window is open.
+- Closing the window keeps the app running in the **system tray** (near the clock), so scheduled syncs continue. Right-click the tray icon to run a sync or quit. **Start with Windows** is in the Notifications tab under *Windows app*.
 
 Every push to `main` rebuilds the app and publishes it to the release named in `packaging/windows/VERSION`; bump that file to cut a new release.
 
@@ -83,7 +84,7 @@ Deploy, open `http://<docker-host>:8787`, and sign in with any username plus `GU
 | `GUI_STATE_FILE` | next to the config | Where the schedule and run history are stored |
 | `GUI_DATA_DIR` | *(unset; `/app/config` in Docker)* | Default folder for `log.log` and `mark.log` in new configs |
 
-The schedule runs only while the GUI is running. The original command-line mode (`python main.py`) still works with the same `config.yaml`, so you can configure in the GUI and run headless if you prefer.
+In Docker the GUI (and its schedule) runs all the time. Dry runs no longer add entries to `mark.log`; their results are in the Dashboard preview instead. The original command-line mode (`python main.py`) still works with the same `config.yaml`, so you can configure in the GUI and run headless if you prefer.
 
 ### How it works
 

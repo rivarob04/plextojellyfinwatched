@@ -140,3 +140,5 @@ config.yaml.bak
 smoke-result.json
 !packaging/windows/jellyplex-watched.spec
 gui_discovery.json
+gui_runs/
+instance.json
