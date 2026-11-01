@@ -35,6 +35,7 @@ CONFIG_PATH = Path(os.environ.get("YAML_FILE", "config.yaml")).resolve()
 STATE_PATH = Path(
     os.environ.get("GUI_STATE_FILE", CONFIG_PATH.parent / "gui_state.json")
 ).resolve()
+DISCOVERY_PATH = STATE_PATH.with_name("gui_discovery.json")
 GUI_PASSWORD = os.environ.get("GUI_PASSWORD", "")
 # In Docker, keep logs next to the config so they survive container updates.
 DATA_DIR = os.environ.get("GUI_DATA_DIR", "").rstrip("/")
@@ -435,9 +436,38 @@ def validate(body: ConfigBody | None = None):
     return run_worker_json("validate", body.data if body else None, timeout=60)
 
 
+def load_discovery() -> dict:
+    try:
+        return json.loads(DISCOVERY_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
 @app.post("/api/test")
 def test_connections(body: ConfigBody | None = None):
-    return run_worker_json("test", body.data if body else None, timeout=900)
+    result = run_worker_json("test", body.data if body else None, timeout=900)
+    found = load_discovery()
+    stamp = datetime.now().isoformat(timespec="seconds")
+    for entry in result.get("results", []):
+        if entry.get("ok") and (entry.get("users") or entry.get("libraries")):
+            found[entry["name"]] = {
+                "type": entry.get("type"),
+                "users": entry.get("users", []),
+                "libraries": entry.get("libraries", []),
+                "updated": stamp,
+            }
+    try:
+        DISCOVERY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DISCOVERY_PATH.write_text(json.dumps(found), encoding="utf-8")
+    except OSError:
+        pass
+    result["discovery"] = found
+    return result
+
+
+@app.get("/api/discovery")
+def discovery():
+    return load_discovery()
 
 
 @app.post("/api/run")

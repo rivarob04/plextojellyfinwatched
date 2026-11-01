@@ -11,6 +11,7 @@ let logOffset = 0;
 let logLines = [];
 let lastRunning = false;
 let testResults = {};
+let discovery = {}; // server name -> { type, users: [], libraries: [{name,type}], updated }
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -64,6 +65,21 @@ const allServers = () =>
   KINDS.flatMap((k) => (cfg[k] || []).map((s, i) => ({ kind: k, index: i, server: s })));
 const serverNames = () => allServers().map((x) => x.server.name).filter(Boolean);
 
+const uniqueCI = (items) => {
+  const seen = new Map();
+  for (const v of items) if (v && !seen.has(v.toLowerCase())) seen.set(v.toLowerCase(), v);
+  return [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+};
+const usersOf = (server) => discovery[server]?.users || [];
+const libsOf = (server) => (discovery[server]?.libraries || []).map((l) => l.name);
+const libLabel = (server, name) => {
+  const lib = (discovery[server]?.libraries || []).find((l) => l.name === name);
+  return lib && lib.type ? `${name}  (${lib.type})` : name;
+};
+const configured = () => new Set(serverNames());
+const allUsers = () => uniqueCI(Object.entries(discovery).filter(([n]) => configured().has(n)).flatMap(([, d]) => d.users || []));
+const allLibs = () => uniqueCI(Object.entries(discovery).filter(([n]) => configured().has(n)).flatMap(([, d]) => (d.libraries || []).map((l) => l.name)));
+
 // ---------------------------------------------------------------------------
 // Generic widgets
 // ---------------------------------------------------------------------------
@@ -103,6 +119,37 @@ function selectField(label, value, options, onChange) {
     options.map((o) => h("option", { value: o, selected: o === value ? true : null }, o || "— choose —")));
   sel.value = value ?? "";
   return label ? h("label", { class: "field" }, label, sel) : sel;
+}
+
+/**
+ * Dropdown of names found on a server, with an escape hatch to type a name.
+ * Falls back to a text box when nothing has been discovered for that server.
+ */
+function pickField(value, options, onChange, opts = {}) {
+  const typeIt = "__type__";
+  const textBox = (v) => h("input", { type: "text", value: v || "", placeholder: opts.placeholder || "Type a name",
+    oninput: (e) => { onChange(e.target.value); markDirty(); } });
+  if (!options.length) return textBox(value);
+  const known = !value || options.some((o) => o.toLowerCase() === value.toLowerCase());
+  const wrap = h("div", { class: "pick" });
+  const sel = h("select", {
+    onchange: (e) => {
+      if (e.target.value === typeIt) {
+        const box = textBox("");
+        wrap.replaceChildren(box); box.focus();
+        onChange(""); markDirty(); return;
+      }
+      onChange(e.target.value); markDirty();
+    },
+  },
+    h("option", { value: "" }, opts.empty || "— choose —"),
+    options.map((o) => h("option", { value: o }, opts.label ? opts.label(o) : o)),
+    !known ? h("option", { value }, `${value}  (not found on server)`) : null,
+    h("option", { value: typeIt }, "✎ Type another name…"));
+  const match = options.find((o) => o.toLowerCase() === (value || "").toLowerCase());
+  sel.value = known ? (match || "") : value;
+  wrap.append(sel);
+  return wrap;
 }
 
 /** Tag input editing an array of strings in place. */
@@ -239,7 +286,9 @@ function renderSummary() {
       h("div", { class: "name" }, server.name || "(unnamed)", h("span", { class: "muted small" }, " · " + KIND_LABEL[kind])),
       h("div", { class: "meta" }, server.baseurl || "no URL"),
       h("div", { class: "meta" }, (server.sync_to || []).length ? "→ " + server.sync_to.join(", ") : "pushes to nothing"),
-      r ? h("div", { class: "res " + (r.ok ? "ok" : "bad") }, (r.ok ? "✓ " : "✕ ") + r.detail) : null);
+      r ? h("div", { class: "res " + (r.ok ? "ok" : "bad") }, (r.ok ? "✓ " : "✕ ") + r.detail) : null,
+      discovery[server.name] ? h("div", { class: "meta" },
+        `${discovery[server.name].users.length} users · ${discovery[server.name].libraries.length} libraries`) : null);
   }));
 }
 
@@ -274,13 +323,11 @@ function renderSettings() {
     textField("Log file", cfg.log_file ?? "log.log", set("log_file")),
     textField("Marked-items file", cfg.mark_file ?? "mark.log", set("mark_file"), { hint: "Every item marked watched is appended here." }),
   );
-  const names = serverNames();
-  void names;
   $("#settings-filters").replaceChildren(
-    chipField("Whitelist users", cfg.whitelist_users, set("whitelist_users")),
-    chipField("Blacklist users", cfg.blacklist_users, set("blacklist_users")),
-    chipField("Whitelist libraries", cfg.whitelist_libraries, set("whitelist_libraries")),
-    chipField("Blacklist libraries", cfg.blacklist_libraries, set("blacklist_libraries")),
+    chipField("Whitelist users", cfg.whitelist_users, set("whitelist_users"), { suggest: allUsers(), placeholder: "Pick or type a user…" }),
+    chipField("Blacklist users", cfg.blacklist_users, set("blacklist_users"), { suggest: allUsers(), placeholder: "Pick or type a user…" }),
+    chipField("Whitelist libraries", cfg.whitelist_libraries, set("whitelist_libraries"), { suggest: allLibs(), placeholder: "Pick or type a library…" }),
+    chipField("Blacklist libraries", cfg.blacklist_libraries, set("blacklist_libraries"), { suggest: allLibs(), placeholder: "Pick or type a library…" }),
     chipField("Whitelist library types", cfg.whitelist_library_types, set("whitelist_library_types"),
       { suggest: ["movie", "show", "movies", "tvshows"] }),
     chipField("Blacklist library types", cfg.blacklist_library_types, set("blacklist_library_types"),
@@ -292,11 +339,39 @@ function renderSettings() {
 // Mappings tab
 // ---------------------------------------------------------------------------
 function renderMappings() {
-  renderMapList("#user-maps", "user_mappings", "username", "Username on that server", "Person (canonical name)");
-  renderMapList("#lib-maps", "library_mappings", "library", "Library name on that server", "Library (canonical name)");
+  renderDiscoveryBar();
+  renderMapList("#user-maps", "user_mappings", "username", "Username on that server", "Person (canonical name)", usersOf);
+  renderMapList("#lib-maps", "library_mappings", "library", "Library name on that server", "Library (canonical name)", libsOf);
 }
 
-function renderMapList(sel, key, field, fieldLabel, canonLabel) {
+function renderDiscoveryBar() {
+  const bar = $("#discovery-bar");
+  const found = serverNames().filter((n) => discovery[n]);
+  const btn = h("button", { class: "btn", onclick: (e) => testConnections(e.target) },
+    found.length ? "↻ Refresh lists" : "Load users & libraries");
+  if (!serverNames().length) {
+    bar.replaceChildren(h("span", { class: "muted" }, "Add servers on the Servers tab first."));
+    return;
+  }
+  const stamps = found.map((n) => discovery[n].updated).sort();
+  const msg = found.length
+    ? h("span", {}, h("b", {}, "Dropdowns ready"), ` — users and libraries from ${found.length} of ${serverNames().length} server${serverNames().length === 1 ? "" : "s"}`,
+        stamps.length ? h("span", { class: "muted small" }, ` · updated ${new Date(stamps[0]).toLocaleString()}`) : "")
+    : h("span", {}, "Connect to your servers to pick users and libraries from a list instead of typing them.");
+  const auto = sameNameUsers();
+  bar.replaceChildren(h("div", { class: "row between" }, msg, btn),
+    auto.length ? h("p", { class: "muted small", style: "margin:.6rem 0 0" },
+      `Already matched automatically (same name on every server): ${auto.join(", ")}`) : null);
+}
+
+/** Users whose name exists on every discovered server need no mapping. */
+function sameNameUsers() {
+  const lists = serverNames().filter((n) => discovery[n]).map((n) => new Set(usersOf(n).map((u) => u.toLowerCase())));
+  if (lists.length < 2) return [];
+  return allUsers().filter((u) => lists.every((set) => set.has(u.toLowerCase())));
+}
+
+function renderMapList(sel, key, field, fieldLabel, canonLabel, optionsFor) {
   const box = $(sel);
   const maps = (cfg[key] = cfg[key] || []);
   box.replaceChildren();
@@ -304,9 +379,19 @@ function renderMapList(sel, key, field, fieldLabel, canonLabel) {
   maps.forEach((m, mi) => {
     m.aliases = m.aliases || [];
     const aliasRows = m.aliases.map((a, ai) => h("div", { class: "alias" },
-      selectField(null, a.server, ["", ...serverNames()], (v) => (a.server = v)),
-      h("input", { type: "text", value: a[field] || "", placeholder: fieldLabel,
-        oninput: (e) => { a[field] = e.target.value; markDirty(); } }),
+      selectField(null, a.server, ["", ...serverNames()], (v) => { a.server = v; renderMappings(); }),
+      pickField(a[field], optionsFor(a.server), (v) => {
+        a[field] = v;
+        if (!m.canonical && v) {
+          m.canonical = field === "username" ? v.toLowerCase() : v;
+          const canon = box.querySelectorAll(".item")[mi]?.querySelector(".item-head input");
+          if (canon) canon.value = m.canonical;
+        }
+      }, {
+        placeholder: fieldLabel,
+        empty: a.server ? `— choose ${field} —` : "— pick a server first —",
+        label: field === "library" ? (o) => libLabel(a.server, o) : null,
+      }),
       h("button", { class: "btn icon", title: "Remove alias", onclick: () => { m.aliases.splice(ai, 1); markDirty(); renderMappings(); } }, "✕")));
     box.append(h("div", { class: "item" },
       h("div", { class: "item-head" },
@@ -320,12 +405,20 @@ function renderMapList(sel, key, field, fieldLabel, canonLabel) {
   });
 }
 
+/** New mapping with one alias row per configured server, ready to pick. */
+function newMapping(field) {
+  const names = serverNames();
+  return { canonical: "", aliases: (names.length ? names : [""]).map((server) => ({ server, [field]: "" })) };
+}
+
 // ---------------------------------------------------------------------------
 // Rules tab
 // ---------------------------------------------------------------------------
 function renderRules() {
-  renderRuleList("#user-rules", "user_sync_rules", "users", "Users", (cfg.user_mappings || []).map((m) => m.canonical).filter(Boolean));
-  renderRuleList("#lib-rules", "library_sync_rules", "libraries", "Libraries", (cfg.library_mappings || []).map((m) => m.canonical).filter(Boolean));
+  renderRuleList("#user-rules", "user_sync_rules", "users", "Users",
+    uniqueCI([...(cfg.user_mappings || []).map((m) => m.canonical), ...allUsers()]));
+  renderRuleList("#lib-rules", "library_sync_rules", "libraries", "Libraries",
+    uniqueCI([...(cfg.library_mappings || []).map((m) => m.canonical), ...allLibs()]));
 }
 
 function renderRuleList(sel, key, field, label, suggestions) {
@@ -363,6 +456,7 @@ function renderAll() {
 }
 
 async function loadConfig() {
+  discovery = await api("/api/discovery").catch(() => ({}));
   const res = await api("/api/config");
   cfg = res.data;
   yamlRaw = res.raw;
@@ -398,17 +492,22 @@ async function validateConfig() {
   } catch (e) { toast(e.message, "bad"); }
 }
 
-async function testConnections() {
-  const btn = $("#btn-test");
-  btn.disabled = true; btn.textContent = "Testing…";
+async function testConnections(button) {
+  const btn = button instanceof HTMLElement ? button : $("#btn-test");
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = "Connecting…";
   try {
     const r = await api("/api/test", { method: "POST", body: { data: cfg } });
     if (r.error) { toast(r.error, "bad"); return; }
     testResults = Object.fromEntries((r.results || []).map((x) => [x.name, x]));
-    renderSummary();
-    toast(r.ok ? "All servers reachable ✓" : "Some servers failed — see details", r.ok ? "ok" : "bad");
+    if (r.discovery) discovery = r.discovery;
+    renderSummary(); renderSettings(); renderMappings(); renderRules();
+    const users = (r.results || []).reduce((n, x) => n + (x.users || []).length, 0);
+    const libs = (r.results || []).reduce((n, x) => n + (x.libraries || []).length, 0);
+    toast(r.ok ? `All servers reachable ✓ — found ${users} users and ${libs} libraries`
+               : "Some servers failed — see the Dashboard for details", r.ok ? "ok" : "bad");
   } catch (e) { toast(e.message, "bad"); }
-  finally { btn.disabled = false; btn.textContent = "Test connections"; }
+  finally { btn.disabled = false; btn.textContent = label; }
 }
 
 // ---------------------------------------------------------------------------
@@ -540,7 +639,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $$("[data-add-server]").forEach((b) => b.addEventListener("click", () => addServer(b.dataset.addServer)));
   $("#btn-save").addEventListener("click", saveConfig);
   $("#btn-validate").addEventListener("click", validateConfig);
-  $("#btn-test").addEventListener("click", testConnections);
+  $("#btn-test").addEventListener("click", (e) => testConnections(e.target));
   $("#btn-run").addEventListener("click", startRun);
   $("#btn-stop").addEventListener("click", () => api("/api/run/stop", { method: "POST" }).catch((e) => toast(e.message, "bad")));
   $("#btn-sched-save").addEventListener("click", saveSchedule);
@@ -548,11 +647,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#marks-filter").addEventListener("input", renderMarks);
   $("#marks-refresh").addEventListener("click", loadMarks);
   $("#add-user-map").addEventListener("click", () => {
-    (cfg.user_mappings = cfg.user_mappings || []).push({ canonical: "", aliases: [{ server: "", username: "" }] });
+    (cfg.user_mappings = cfg.user_mappings || []).push(newMapping("username"));
     markDirty(); renderMappings();
   });
   $("#add-lib-map").addEventListener("click", () => {
-    (cfg.library_mappings = cfg.library_mappings || []).push({ canonical: "", aliases: [{ server: "", library: "" }] });
+    (cfg.library_mappings = cfg.library_mappings || []).push(newMapping("library"));
     markDirty(); renderMappings();
   });
   $("#add-user-rule").addEventListener("click", () => {

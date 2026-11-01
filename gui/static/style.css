@@ -244,3 +244,7 @@ textarea#yaml-text { min-height: 60vh; font-size: .85rem; line-height: 1.5; tab-
   .alias, .rule { grid-template-columns: 1fr; }
   .arrow { display: none; }
 }
+
+.pick select, .pick input { width: 100%; }
+.card.discovery { background: var(--accent-soft); border-color: transparent; padding: .8rem 1.1rem; }
+.card.discovery .btn { background: var(--panel); }

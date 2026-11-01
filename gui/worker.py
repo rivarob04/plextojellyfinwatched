@@ -74,44 +74,96 @@ def _short_error(error: Exception) -> str:
     return text if len(text) <= 200 else text[:197] + "…"
 
 
+def _connect(kind: str, app_settings, server_settings):
+    from src.emby import Emby
+    from src.jellyfin import Jellyfin
+    from src.plex import Plex
+
+    cls = {"plex": Plex, "jellyfin": Jellyfin, "emby": Emby}[kind]
+    return cls(app_settings=app_settings, server_settings=server_settings)
+
+
+def _discover(kind: str, conn) -> tuple[list[str], list[dict]]:
+    """Return (usernames, libraries) as the server reports them."""
+    if kind == "plex":
+        users = sorted(
+            {(u.username or u.title) for u in conn.users if (u.username or u.title)},
+            key=str.casefold,
+        )
+    else:
+        users = sorted(conn.users.keys(), key=str.casefold)
+    libraries = [
+        {"name": name, "type": lib_type}
+        for name, lib_type in sorted(conn.get_libraries().items(), key=lambda x: x[0].casefold())
+    ]
+    return users, libraries
+
+
 def cmd_test(config: str) -> int:
+    """Connect to every server on its own and list its users and libraries.
+
+    Works even when the config as a whole is not valid yet (for example only
+    one server added so far), so servers can be checked as they are added.
+    """
+    import yaml
     from loguru import logger
+    from pydantic import ValidationError
+
+    from src.settings import AppSettings, EmbySettings, JellyfinSettings, PlexSettings
 
     logger.remove()
 
     try:
-        settings = _load(config)
+        raw = yaml.safe_load(Path(config).read_text(encoding="utf-8")) or {}
     except Exception as error:  # noqa: BLE001
         _emit({"ok": False, "error": _startup_error(error), "results": []})
         return 1
 
-    from src.emby import Emby
-    from src.jellyfin import Jellyfin
-    from src.plex import Plex
-    from src.settings import EmbySettings, JellyfinSettings, PlexSettings
+    knobs = {
+        k: raw[k]
+        for k in ("request_timeout", "max_threads", "generate_guids", "generate_locations")
+        if k in raw
+    }
+    try:
+        app_settings = _load(config)
+    except Exception:  # noqa: BLE001 - fall back to defaults for discovery
+        app_settings = AppSettings.model_construct(**knobs)
 
+    models = {"plex": PlexSettings, "jellyfin": JellyfinSettings, "emby": EmbySettings}
     results = []
-    for server in settings.all_servers:
-        entry = {"name": server.name, "type": "", "ok": False, "detail": ""}
-        try:
-            if isinstance(server, PlexSettings):
-                entry["type"] = "plex"
-                conn = Plex(app_settings=settings, server_settings=server)
-                entry["detail"] = conn.info()
-            elif isinstance(server, JellyfinSettings):
-                entry["type"] = "jellyfin"
-                conn = Jellyfin(app_settings=settings, server_settings=server)
-                entry["detail"] = f"{conn.server_name} {conn.server_version}"
-            elif isinstance(server, EmbySettings):
-                entry["type"] = "emby"
-                conn = Emby(app_settings=settings, server_settings=server)
-                entry["detail"] = f"{conn.server_name} {conn.server_version}"
-            entry["ok"] = True
-        except Exception as error:  # noqa: BLE001
-            entry["detail"] = _short_error(error)
-        results.append(entry)
+    for kind, model in models.items():
+        for item in raw.get(kind) or []:
+            name = (item or {}).get("name") or "(unnamed)"
+            entry = {"name": name, "type": kind, "ok": False, "detail": "",
+                     "users": [], "libraries": []}
+            try:
+                server_settings = model.model_validate(item)
+            except ValidationError as error:
+                problems = "; ".join(
+                    f"{'.'.join(str(p) for p in d['loc']) or 'server'}: {d['msg']}"
+                    for d in error.errors(include_context=False, include_input=False)
+                )
+                entry["detail"] = "Config: " + problems
+                results.append(entry)
+                continue
+            try:
+                conn = _connect(kind, app_settings, server_settings)
+                entry["detail"] = (
+                    conn.info() if kind == "plex"
+                    else f"{conn.server_name} {conn.server_version}"
+                )
+                entry["ok"] = True
+            except Exception as error:  # noqa: BLE001
+                entry["detail"] = _short_error(error)
+                results.append(entry)
+                continue
+            try:
+                entry["users"], entry["libraries"] = _discover(kind, conn)
+            except Exception as error:  # noqa: BLE001
+                entry["detail"] += f" (could not list users/libraries: {_short_error(error)})"
+            results.append(entry)
 
-    _emit({"ok": all(r["ok"] for r in results), "results": results})
+    _emit({"ok": bool(results) and all(r["ok"] for r in results), "results": results})
     return 0
 
 

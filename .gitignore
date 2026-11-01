@@ -139,3 +139,4 @@ config.yaml.bak
 /dist/
 smoke-result.json
 !packaging/windows/jellyplex-watched.spec
+gui_discovery.json
