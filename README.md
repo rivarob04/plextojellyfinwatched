@@ -33,13 +33,29 @@ Your browser opens at <http://127.0.0.1:8787>. Add your servers, click **Test co
 
 (Without uv: `pip install .` then `python gui.py`.)
 
-### Run it in Docker
+### Run it in Docker / Dockhand
 
-```bash
-docker compose -f docker-compose.gui.yml up -d --build
-```
+Every push to `main` builds a multi-arch image (amd64 + arm64) to
+`ghcr.io/rivarob04/plextojellyfinwatched:latest`, and `docker-compose.yml` uses it.
 
-Open `http://<your-host>:8787` and sign in with any username and the `GUI_PASSWORD` set in `docker-compose.gui.yml` (change it!). The config lives in `./config/config.yaml`.
+**Dockhand** — create a stack either way:
+
+- *From Git:* repository `https://github.com/rivarob04/plextojellyfinwatched`, branch `main`, compose path `docker-compose.yml`.
+- *Pasted compose:* copy the contents of `docker-compose.yml`.
+
+Then add stack environment variables:
+
+| Variable | Required | Example |
+| --- | --- | --- |
+| `GUI_PASSWORD` | yes | a long password |
+| `CONFIG_DIR` | recommended | `/opt/appdata/jellyplex-watched` (host folder for config, logs, history) |
+| `PUID` / `PGID` | no | `1000` |
+| `TZ` | no | `America/Toronto` |
+| `GUI_PORT_HOST` | no | `8787` |
+
+Deploy, open `http://<docker-host>:8787`, and sign in with any username plus `GUI_PASSWORD`. The container starts fine with no config — the GUI is where you create it.
+
+**Plain Docker:** `GUI_PASSWORD=yourpassword docker compose up -d`. To build from source instead of pulling: `docker compose -f docker-compose.build.yml up -d --build`.
 
 ### GUI options (environment variables)
 
@@ -51,6 +67,7 @@ Open `http://<your-host>:8787` and sign in with any username and the `GUI_PASSWO
 | `GUI_PASSWORD` | *(none)* | Password prompt for the GUI. **Set this whenever the GUI is reachable from your network** — it displays your server tokens |
 | `GUI_NO_BROWSER` | *(unset)* | `1` to skip opening a browser tab on start |
 | `GUI_STATE_FILE` | next to the config | Where the schedule and run history are stored |
+| `GUI_DATA_DIR` | *(unset; `/app/config` in Docker)* | Default folder for `log.log` and `mark.log` in new configs |
 
 The schedule runs only while the GUI is running. The original command-line mode (`python main.py`) still works with the same `config.yaml`, so you can configure in the GUI and run headless if you prefer.
 

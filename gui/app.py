@@ -31,14 +31,16 @@ STATE_PATH = Path(
     os.environ.get("GUI_STATE_FILE", CONFIG_PATH.parent / "gui_state.json")
 ).resolve()
 GUI_PASSWORD = os.environ.get("GUI_PASSWORD", "")
+# In Docker, keep logs next to the config so they survive container updates.
+DATA_DIR = os.environ.get("GUI_DATA_DIR", "").rstrip("/")
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "dryrun": True,
     "debug_level": "INFO",
     "run_only_once": False,
     "sleep_duration": 3600,
-    "log_file": "log.log",
-    "mark_file": "mark.log",
+    "log_file": f"{DATA_DIR}/log.log" if DATA_DIR else "log.log",
+    "mark_file": f"{DATA_DIR}/mark.log" if DATA_DIR else "mark.log",
     "request_timeout": 300,
     "max_threads": 1,
     "generate_guids": True,
@@ -332,7 +334,7 @@ app = FastAPI(title="JellyPlex-Watched GUI", docs_url=None, redoc_url=None)
 
 @app.middleware("http")
 async def basic_auth(request: Request, call_next):
-    if GUI_PASSWORD:
+    if GUI_PASSWORD and request.url.path != "/healthz":
         header = request.headers.get("authorization", "")
         ok = False
         if header.startswith("Basic "):
@@ -365,6 +367,11 @@ class ScheduleBody(BaseModel):
     enabled: bool
     interval_minutes: int = 60
     dryrun: bool = True
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
 
 
 @app.get("/api/config")

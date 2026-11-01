@@ -1,0 +1,16 @@
+# JellyPlex-Watched GUI — ready for Dockhand, Portainer or `docker compose up -d`.
+# Set GUI_PASSWORD (and optionally PUID/PGID/TZ) as stack environment variables.
+services:
+  jellyplex-watched:
+    image: ghcr.io/rivarob04/plextojellyfinwatched:latest
+    container_name: jellyplex-watched
+    restart: unless-stopped
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-America/Toronto}
+      GUI_PASSWORD: ${GUI_PASSWORD:?Set GUI_PASSWORD in the stack environment}
+    ports:
+      - "${GUI_PORT_HOST:-8787}:8787"
+    volumes:
+      - ${CONFIG_DIR:-./config}:/app/config

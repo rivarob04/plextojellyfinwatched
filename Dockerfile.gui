@@ -1,0 +1,44 @@
+# JellyPlex-Watched with the web GUI as the default command.
+FROM ghcr.io/astral-sh/uv:bookworm-slim
+
+ENV PUID=1000 \
+    PGID=1000 \
+    TZ=UTC \
+    YAML_FILE=/app/config/config.yaml \
+    GUI_DATA_DIR=/app/config \
+    GUI_HOST=0.0.0.0 \
+    GUI_PORT=8787 \
+    GUI_NO_BROWSER=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_CACHE_DIR=/tmp/.cache/uv \
+    UV_PYTHON_INSTALL_DIR=/app/.bin
+
+RUN apt-get update && \
+    apt-get install tini gosu dos2unix tzdata --yes --no-install-recommends && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+RUN --mount=type=cache,target=/tmp/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --frozen --no-install-project --no-dev
+
+COPY . /app
+RUN --mount=type=cache,target=/tmp/.cache/uv \
+    uv sync --frozen --no-dev && \
+    chmod -R a+rX /app/.venv /app/.bin && \
+    dos2unix gui-entrypoint.sh && chmod +x gui-entrypoint.sh
+
+ENV PATH="/app/.venv/bin:$PATH"
+
+EXPOSE 8787
+VOLUME ["/app/config"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import os,urllib.request as u; u.urlopen(f'http://127.0.0.1:{os.environ.get(\"GUI_PORT\",\"8787\")}/healthz', timeout=4)" || exit 1
+
+ENTRYPOINT ["/bin/tini", "--", "/app/gui-entrypoint.sh"]
+CMD ["python", "-u", "gui.py"]
