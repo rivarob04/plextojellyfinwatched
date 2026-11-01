@@ -1,8 +1,70 @@
-# JellyPlex-Watched
+# plextojellyfinwatched — JellyPlex-Watched with a GUI
 
-[![Codacy Badge](https://app.codacy.com/project/badge/Grade/26b47c5db63942f28f02f207f692dc85)](https://www.codacy.com/gh/luigi311/JellyPlex-Watched/dashboard?utm_source=github.com&utm_medium=referral&utm_content=luigi311/JellyPlex-Watched&utm_campaign=Badge_Grade)
+A fork of [luigi311/JellyPlex-Watched](https://github.com/luigi311/JellyPlex-Watched) that adds a **web GUI** on top of the original sync engine. Keep every user's watched history in sync between Plex, Jellyfin and Emby — configured, tested and run from your browser instead of a YAML file and a terminal.
 
-Sync watched between jellyfin, plex and emby locally
+The sync engine (`src/`) is unchanged from upstream, so matching, mappings and rules behave exactly as documented below.
+
+## The GUI
+
+| Tab | What you can do |
+| --- | --- |
+| **Dashboard** | Start a sync (dry run or live), stop it, watch the live colour-coded log, see recent runs, test every server connection, and turn on a repeating schedule |
+| **Servers** | Add/remove Plex, Jellyfin and Emby servers, and tick a **sync-direction grid** (row pushes to column) for one-way or two-way sync |
+| **Settings & Filters** | Dry-run default, log level, threads, timeouts, GUID/path matching, and user / library / library-type white- and blacklists |
+| **Mappings** | Link the same person or library when names differ between servers |
+| **Sync Rules** | Per-user and per-library direction overrides |
+| **YAML** | Edit the raw `config.yaml` directly — form and file stay interchangeable |
+| **Marked** | Searchable list of every item that has been marked watched |
+
+Every save is validated with the real settings loader first, and the previous file is kept as `config.yaml.bak`.
+
+### Run it locally
+
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+
+```bash
+git clone https://github.com/rivarob04/plextojellyfinwatched.git
+cd plextojellyfinwatched
+uv sync
+uv run gui.py
+```
+
+Your browser opens at <http://127.0.0.1:8787>. Add your servers, click **Test connections**, **Save**, then **Start sync** with *Dry run* ticked to preview what would change. Untick it for a live run.
+
+(Without uv: `pip install .` then `python gui.py`.)
+
+### Run it in Docker
+
+```bash
+docker compose -f docker-compose.gui.yml up -d --build
+```
+
+Open `http://<your-host>:8787` and sign in with any username and the `GUI_PASSWORD` set in `docker-compose.gui.yml` (change it!). The config lives in `./config/config.yaml`.
+
+### GUI options (environment variables)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `YAML_FILE` | `config.yaml` | Config file the GUI edits and runs |
+| `GUI_HOST` | `127.0.0.1` | Bind address; `0.0.0.0` to allow other devices |
+| `GUI_PORT` | `8787` | Port |
+| `GUI_PASSWORD` | *(none)* | Password prompt for the GUI. **Set this whenever the GUI is reachable from your network** — it displays your server tokens |
+| `GUI_NO_BROWSER` | *(unset)* | `1` to skip opening a browser tab on start |
+| `GUI_STATE_FILE` | next to the config | Where the schedule and run history are stored |
+
+The schedule runs only while the GUI is running. The original command-line mode (`python main.py`) still works with the same `config.yaml`, so you can configure in the GUI and run headless if you prefer.
+
+### How it works
+
+`gui/app.py` is a small FastAPI server serving a single-page interface from `gui/static/`. Each validate, connection test and sync runs in a separate process through `gui/worker.py`, which calls the upstream `load_settings` and `main_loop` directly, so a stuck server can be stopped without taking the GUI down.
+
+## Credits & license
+
+All sync logic is the work of [Luigi311](https://github.com/luigi311) and the JellyPlex-Watched contributors. This fork is distributed under the same **GNU GPL v3** licence (see `LICENSE`).
+
+---
+
+# Original JellyPlex-Watched documentation
 
 ## Description
 

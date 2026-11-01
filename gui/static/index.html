@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JellyPlex-Watched</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23e5a00d'/><path d='M9 16.5l4.5 4.5L23 11.5' stroke='%23111' stroke-width='3.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">✓</span>
+      <div>
+        <h1>JellyPlex-Watched</h1>
+        <p class="sub">Keep watched status in sync across Plex, Jellyfin &amp; Emby</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span id="dirty" class="dirty" hidden>Unsaved changes</span>
+      <button class="btn ghost" id="btn-validate" title="Check the configuration without saving">Validate</button>
+      <button class="btn primary" id="btn-save">Save</button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="dashboard" class="active">Dashboard</button>
+    <button role="tab" data-tab="servers">Servers</button>
+    <button role="tab" data-tab="settings">Settings &amp; Filters</button>
+    <button role="tab" data-tab="mappings">Mappings</button>
+    <button role="tab" data-tab="rules">Sync Rules</button>
+    <button role="tab" data-tab="yaml">YAML</button>
+    <button role="tab" data-tab="marks">Marked</button>
+  </nav>
+
+  <main>
+    <!-- DASHBOARD -->
+    <section id="tab-dashboard" class="tab active">
+      <div class="grid-2">
+        <div class="card">
+          <h2>Run a sync</h2>
+          <p class="muted">Runs one pass with the saved configuration.</p>
+          <label class="switch-row">
+            <input type="checkbox" id="run-dryrun" checked>
+            <span><b>Dry run</b> — log what would change, change nothing</span>
+          </label>
+          <div class="row gap">
+            <button class="btn primary big" id="btn-run">▶ Start sync</button>
+            <button class="btn danger" id="btn-stop" disabled>■ Stop</button>
+          </div>
+          <div id="run-status" class="status-line"></div>
+        </div>
+
+        <div class="card">
+          <h2>Schedule</h2>
+          <p class="muted">Repeat automatically while the GUI is running.</p>
+          <label class="switch-row">
+            <input type="checkbox" id="sched-enabled">
+            <span><b>Enabled</b></span>
+          </label>
+          <div class="row gap wrap">
+            <label class="field inline">Every
+              <input type="number" id="sched-interval" min="1" value="60"> minutes</label>
+            <label class="switch-row compact">
+              <input type="checkbox" id="sched-dryrun" checked><span>Dry run</span>
+            </label>
+          </div>
+          <div class="row gap">
+            <button class="btn" id="btn-sched-save">Apply schedule</button>
+            <span id="sched-next" class="muted small"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row between">
+          <h2>Servers</h2>
+          <button class="btn ghost" id="btn-test">Test connections</button>
+        </div>
+        <div id="server-summary" class="server-summary"></div>
+      </div>
+
+      <div class="card">
+        <div class="row between">
+          <h2>Live log</h2>
+          <div class="row gap">
+            <label class="switch-row compact"><input type="checkbox" id="log-follow" checked><span>Follow</span></label>
+            <input type="search" id="log-filter" placeholder="Filter…">
+          </div>
+        </div>
+        <pre id="log" class="log" aria-live="polite"><span class="muted">No sync has run yet in this session.</span></pre>
+      </div>
+
+      <div class="card">
+        <h2>Recent runs</h2>
+        <table class="table" id="history"><thead><tr>
+          <th>Started</th><th>Trigger</th><th>Mode</th><th>Status</th><th>Errors</th><th>Duration</th>
+        </tr></thead><tbody></tbody></table>
+      </div>
+    </section>
+
+    <!-- SERVERS -->
+    <section id="tab-servers" class="tab">
+      <div class="card">
+        <h2>Sync directions</h2>
+        <p class="muted">Tick a cell to make the row server <b>push</b> watched status <b>to</b> the column server. Tick both ways for two-way sync.</p>
+        <div id="matrix" class="matrix-wrap"></div>
+      </div>
+      <div class="row gap wrap add-row">
+        <button class="btn" data-add-server="plex">+ Plex server</button>
+        <button class="btn" data-add-server="jellyfin">+ Jellyfin server</button>
+        <button class="btn" data-add-server="emby">+ Emby server</button>
+      </div>
+      <div id="server-list"></div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section id="tab-settings" class="tab">
+      <div class="grid-2">
+        <div class="card">
+          <h2>Behaviour</h2>
+          <div id="settings-behaviour" class="form"></div>
+        </div>
+        <div class="card">
+          <h2>Matching &amp; files</h2>
+          <div id="settings-files" class="form"></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Filters</h2>
+        <p class="muted">A non-empty whitelist wins: only listed entries pass and the matching blacklist is ignored. Plex library types are <code>movie</code>/<code>show</code>; Jellyfin and Emby use <code>movies</code>/<code>tvshows</code>.</p>
+        <div id="settings-filters" class="grid-2 form"></div>
+      </div>
+    </section>
+
+    <!-- MAPPINGS -->
+    <section id="tab-mappings" class="tab">
+      <div class="card">
+        <div class="row between"><h2>User mappings</h2><button class="btn" id="add-user-map">+ Add person</button></div>
+        <p class="muted">Only needed when the same person has a different username on different servers, or one account fans out to several users.</p>
+        <div id="user-maps"></div>
+      </div>
+      <div class="card">
+        <div class="row between"><h2>Library mappings</h2><button class="btn" id="add-lib-map">+ Add library</button></div>
+        <p class="muted">Only needed when a library has a different name on different servers.</p>
+        <div id="lib-maps"></div>
+      </div>
+    </section>
+
+    <!-- RULES -->
+    <section id="tab-rules" class="tab">
+      <div class="card">
+        <div class="row between"><h2>User sync rules</h2><button class="btn" id="add-user-rule">+ Add rule</button></div>
+        <p class="muted">Push these users from one server to another, overriding the user filters for that direction. Use <code>*</code> for all users.</p>
+        <div id="user-rules"></div>
+      </div>
+      <div class="card">
+        <div class="row between"><h2>Library sync rules</h2><button class="btn" id="add-lib-rule">+ Add rule</button></div>
+        <p class="muted">Push these libraries from one server to another, overriding the library name and type filters for that direction. Use <code>*</code> for all libraries.</p>
+        <div id="lib-rules"></div>
+      </div>
+    </section>
+
+    <!-- YAML -->
+    <section id="tab-yaml" class="tab">
+      <div class="card">
+        <div class="row between">
+          <h2>config.yaml</h2>
+          <div class="row gap">
+            <button class="btn ghost" id="yaml-reload">Reload from forms</button>
+            <button class="btn primary" id="yaml-save">Save YAML</button>
+          </div>
+        </div>
+        <p class="muted small" id="yaml-path"></p>
+        <textarea id="yaml-text" spellcheck="false"></textarea>
+      </div>
+    </section>
+
+    <!-- MARKS -->
+    <section id="tab-marks" class="tab">
+      <div class="card">
+        <div class="row between">
+          <h2>Items marked watched</h2>
+          <button class="btn ghost" id="marks-refresh">Refresh</button>
+        </div>
+        <p class="muted small" id="marks-path"></p>
+        <input type="search" id="marks-filter" placeholder="Filter by user, library or title…">
+        <table class="table" id="marks"><thead><tr>
+          <th>Server</th><th>User</th><th>Library</th><th>Title</th><th>Episode</th>
+        </tr></thead><tbody></tbody></table>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
