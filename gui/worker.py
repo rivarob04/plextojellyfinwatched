@@ -207,7 +207,51 @@ def _capture_changes(dryrun: bool) -> None:
         module.log_marked = wrapped
 
 
-def cmd_run(config: str, dryrun: str | None) -> int:
+def _run_watchlists(settings, spec_path: str, dryrun: bool) -> int:
+    """Plex watchlist -> Jellyfin/Emby favorites. Returns the error count."""
+    from loguru import logger
+
+    from gui import watchlist
+    from src.emby import Emby
+    from src.jellyfin import Jellyfin
+    from src.settings import EmbySettings, JellyfinSettings
+
+    spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
+    links = [link for link in spec.get("links", []) if link.get("enabled", True)]
+    if not links:
+        return 0
+    wanted = {t.get("server") for link in links for t in link.get("targets") or []}
+
+    connections = {}
+    errors = 0
+    for server in settings.all_servers:
+        if server.name not in wanted:
+            continue
+        try:
+            if isinstance(server, JellyfinSettings):
+                connections[server.name] = Jellyfin(app_settings=settings, server_settings=server)
+            elif isinstance(server, EmbySettings):
+                connections[server.name] = Emby(app_settings=settings, server_settings=server)
+        except Exception as error:  # noqa: BLE001
+            logger.error(f"Watchlist: could not connect to {server.name}: {error}")
+            errors += 1
+
+    def log(level: str, message: str) -> None:
+        (logger.error if level == "ERROR" else logger.info)(message)
+
+    def emit(event: dict) -> None:
+        print(CHANGE_PREFIX + json.dumps(event, ensure_ascii=False), flush=True)
+
+    logger.info(f"Watchlist: syncing {len(links)} linked Plex account(s){' [DRYRUN]' if dryrun else ''}")
+    errors += watchlist.run(
+        links, connections, Path(spec["state_path"]), dryrun,
+        bool(spec.get("remove", True)), emit, log,
+    )
+    logger.info("Watchlist: finished")
+    return errors
+
+
+def cmd_run(config: str, dryrun: str | None, job: str = "sync", watchlist_spec: str | None = None) -> int:
     from loguru import logger
 
     from src.functions import configure_logger
@@ -225,15 +269,25 @@ def cmd_run(config: str, dryrun: str | None) -> int:
     settings = settings.model_copy(update=update)
 
     configure_logger(settings.log_file, settings.debug_level)
-    _capture_changes(settings.dryrun)
-    try:
-        main_loop(settings, 100.0)
-    except Exception as error:  # noqa: BLE001
-        logger.error(error)
-        logger.error(traceback.format_exc())
-        return 1
-    logger.info("Sync pass finished")
-    return 0
+    failed = False
+    if job in ("sync", "both"):
+        _capture_changes(settings.dryrun)
+        try:
+            main_loop(settings, 100.0)
+            logger.info("Sync pass finished")
+        except Exception as error:  # noqa: BLE001
+            logger.error(error)
+            logger.error(traceback.format_exc())
+            failed = True
+    if job in ("watchlist", "both") and watchlist_spec:
+        try:
+            if _run_watchlists(settings, watchlist_spec, settings.dryrun):
+                failed = failed or job == "watchlist"
+        except Exception as error:  # noqa: BLE001
+            logger.error(f"Watchlist: {error}")
+            logger.error(traceback.format_exc())
+            failed = True
+    return 1 if failed else 0
 
 
 def main() -> int:
@@ -245,13 +299,15 @@ def main() -> int:
     parser.add_argument("command", choices=["validate", "test", "run"])
     parser.add_argument("--config", required=True)
     parser.add_argument("--dryrun", choices=["true", "false"])
+    parser.add_argument("--job", choices=["sync", "watchlist", "both"], default="sync")
+    parser.add_argument("--watchlist")
     args = parser.parse_args()
 
     if args.command == "validate":
         return cmd_validate(args.config)
     if args.command == "test":
         return cmd_test(args.config)
-    return cmd_run(args.config, args.dryrun)
+    return cmd_run(args.config, args.dryrun, args.job, args.watchlist)
 
 
 if __name__ == "__main__":

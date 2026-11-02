@@ -286,3 +286,7 @@ tr.clickable:hover td { background: var(--panel-2); }
 .suggest .grow { flex: 1; }
 .notify-grid { grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); align-items: start; }
 @media (max-width: 900px) { .notify-grid { grid-template-columns: 1fr; } }
+.tag.favorite { background: #fde7b0; color: #5a3d00; }
+.tag.unfavorite { background: var(--panel-2); border: 1px solid var(--line); }
+.tag.missing { background: transparent; border: 1px dashed var(--muted); color: var(--muted); }
+@media (prefers-color-scheme: dark) { .tag.favorite { background: #4a3a10; color: #f6d68a; } }

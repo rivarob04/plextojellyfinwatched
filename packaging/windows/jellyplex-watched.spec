@@ -18,7 +18,7 @@ common_hidden = (
     collect_submodules("src")
     + collect_submodules("plexapi")
     + collect_submodules("pydantic_settings")
-    + ["main", "gui", "gui.app", "gui.worker", "gui.notify"]
+    + ["main", "gui", "gui.app", "gui.worker", "gui.notify", "gui.watchlist"]
 )
 datas = [(os.path.join(ROOT, "gui", "static"), os.path.join("gui", "static"))]
 

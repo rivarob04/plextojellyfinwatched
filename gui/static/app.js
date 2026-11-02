@@ -134,7 +134,7 @@ function selectField(label, value, options, onChange, opts = {}) {
 function pickField(value, options, onChange, opts = {}) {
   const typeIt = "__type__";
   const textBox = (v) => h("input", { type: "text", value: v || "", placeholder: opts.placeholder || "Type a name",
-    oninput: (e) => { onChange(e.target.value); markDirty(); } });
+    oninput: (e) => { onChange(e.target.value); if (!opts.noDirty) markDirty(); } });
   if (!options.length) return textBox(value);
   const known = !value || options.some((o) => o.toLowerCase() === value.toLowerCase());
   const wrap = h("div", { class: "pick" });
@@ -143,9 +143,9 @@ function pickField(value, options, onChange, opts = {}) {
       if (e.target.value === typeIt) {
         const box = textBox("");
         wrap.replaceChildren(box); box.focus();
-        onChange(""); markDirty(); return;
+        onChange(""); if (!opts.noDirty) markDirty(); return;
       }
-      onChange(e.target.value); markDirty();
+      onChange(e.target.value); if (!opts.noDirty) markDirty();
     },
   },
     h("option", { value: "" }, opts.empty || "— choose —"),
@@ -704,6 +704,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   loadSchedule().catch(() => {});
   loadResults();
   loadNotifications();
+  loadWatchlist();
+  $("#wl-link").addEventListener("click", linkWatchlistAccount);
+  $("#wl-save").addEventListener("click", () => saveWatchlist(true));
+  $("#wl-preview").addEventListener("click", () => runWatchlist(true));
+  $("#wl-run").addEventListener("click", () => runWatchlist(false));
   $("#results-filter").addEventListener("input", renderResults);
   $("#notify-save").addEventListener("click", saveNotifications);
   $("#notify-test").addEventListener("click", testNotifications);
@@ -824,16 +829,21 @@ function renderResults() {
   const changes = results.changes.filter((c) => !f ||
     [c.user, c.server, c.library, c.title, c.episode].some((v) => (v || "").toLowerCase().includes(f)));
 
-  const watched = results.changes.filter((c) => c.kind !== "partial").length;
-  const partial = results.changes.length - watched;
+  const count = (k) => results.changes.filter((c) => (c.kind || "watched") === k).length;
+  const watched = count("watched"), partial = count("partial");
+  const favs = count("favorite"), unfavs = count("unfavorite"), missing = count("missing");
+  const real = results.changes.length - missing;
   const verb = dry ? "Would mark" : "Marked";
   const headline = h("div", { class: "headline" },
     statusPill(run.status),
-    h("span", { class: "stat" }, h("b", {}, String(results.changes.length)), ` ${dry ? "would change" : "changed"}`),
-    h("span", { class: "stat" }, h("b", {}, String(watched)), " watched"),
-    h("span", { class: "stat" }, h("b", {}, String(partial)), " in progress"),
+    h("span", { class: "stat" }, h("b", {}, String(real)), ` ${dry ? "would change" : "changed"}`),
+    watched || !favs ? h("span", { class: "stat" }, h("b", {}, String(watched)), " watched") : null,
+    partial ? h("span", { class: "stat" }, h("b", {}, String(partial)), " in progress") : null,
+    favs ? h("span", { class: "stat" }, h("b", {}, String(favs)), " ★ favorites") : null,
+    unfavs ? h("span", { class: "stat" }, h("b", {}, String(unfavs)), " removed from favorites") : null,
+    missing ? h("span", { class: "stat" }, h("b", {}, String(missing)), " not in library") : null,
     run.errors ? h("span", { class: "stat bad" }, h("b", {}, String(run.errors)), " errors") : null,
-    dry && results.changes.length ? h("span", { class: "muted small" }, "Nothing was changed. Untick Dry run to apply these.") : null);
+    dry && real ? h("span", { class: "muted small" }, "Nothing was changed. Untick Dry run to apply these.") : null);
 
   if (!results.changes.length) {
     body.replaceChildren(headline, h("p", { class: "empty" },
@@ -846,25 +856,41 @@ function renderResults() {
   const groups = new Map();
   for (const c of changes) {
     const key = `${c.user}\u0000${c.server}`;
-    if (!groups.has(key)) groups.set(key, { user: c.user, server: c.server, type: (c.server_type || "").toLowerCase(), items: [] });
+    if (!groups.has(key)) groups.set(key, { user: c.user, server: c.server, type: (c.server_type || "").toLowerCase(), items: [], source: c.source });
     groups.get(key).items.push(c);
   }
   const sorted = [...groups.values()].sort((a, b) => b.items.length - a.items.length);
   const blocks = sorted.slice(0, 200).map((g, gi) => {
     const libs = new Map();
     for (const c of g.items) { if (!libs.has(c.library)) libs.set(c.library, []); libs.get(c.library).push(c); }
-    const w = g.items.filter((c) => c.kind !== "partial").length;
+    const w = g.items.filter((c) => (c.kind || "watched") === "watched").length;
+    const gp = g.items.filter((c) => c.kind === "partial").length;
+    const gf = g.items.filter((c) => c.kind === "favorite").length;
+    const gu = g.items.filter((c) => c.kind === "unfavorite").length;
+    const gm = g.items.filter((c) => c.kind === "missing").length;
     const rows = [];
     for (const [lib, items] of libs) {
       rows.push(h("tr", { class: "lib-head" }, h("td", { colspan: 3 }, lib || "—")));
       for (const c of items.slice(0, 500)) rows.push(h("tr", {},
         h("td", {}, c.title), h("td", {}, c.episode || ""),
-        h("td", {}, c.kind === "partial" ? h("span", { class: "tag" }, `resume at ${c.minutes} min`) : h("span", { class: "tag" }, "watched"))));
+        h("td", {}, h("span", { class: "tag " + (c.kind || "watched") }, {
+          partial: `resume at ${c.minutes} min`,
+          favorite: dry ? "★ add to favorites" : "★ added to favorites",
+          unfavorite: dry ? "☆ remove from favorites" : "☆ removed from favorites",
+          missing: "not in library",
+        }[c.kind] || "watched"))));
       if (items.length > 500) rows.push(h("tr", {}, h("td", { colspan: 3, class: "muted" }, `…and ${items.length - 500} more`)));
     }
     return h("details", { class: "group", open: gi === 0 && sorted.length <= 3 ? true : null },
       h("summary", {}, h("span", { class: `dot ${g.type}` }), h("span", { class: "who" }, g.user), h("span", { class: "muted" }, "on " + g.server),
-        h("span", { class: "counts" }, `${verb} ${w} watched${g.items.length - w ? ` · ${g.items.length - w} in progress` : ""}`)),
+        g.source ? h("span", { class: "muted small" }, `· from ${g.source}'s Plex watchlist`) : null,
+        h("span", { class: "counts" }, [
+          w ? `${verb} ${w} watched` : "",
+          gp ? `${gp} in progress` : "",
+          gf ? `${gf} ★ favorite${gf === 1 ? "" : "s"}` : "",
+          gu ? `${gu} unfavorited` : "",
+          gm ? `${gm} not in library` : "",
+        ].filter(Boolean).join(" · "))),
       h("table", { class: "table" }, h("tbody", {}, rows)));
   });
   body.replaceChildren(headline, ...blocks,
@@ -1019,4 +1045,145 @@ function renderDesktop(opts) {
       "Scheduled syncs keep running. Quit from the tray icon (bottom-right, near the clock)."),
     opts.autostart_supported ? row("Start with Windows", "start_with_windows", "Starts hidden in the tray when you sign in.") : null,
     row("Start minimized to the tray", "start_minimized"));
+}
+
+
+// ---------------------------------------------------------------------------
+// 6. Plex watchlist -> Jellyfin / Emby favorites
+// ---------------------------------------------------------------------------
+let wl = { enabled: false, with_sync: true, remove: true, links: [] };
+let wlDirty = false;
+
+const favServers = () => allServers().filter((x) => x.kind !== "plex" && x.server.name).map((x) => x.server.name);
+
+async function loadWatchlist() {
+  wl = await api("/api/watchlist").catch(() => wl);
+  wlDirty = false;
+  renderWatchlist();
+}
+
+function wlChanged() { wlDirty = true; $("#wl-msg").replaceChildren(h("span", { class: "warn" }, "Unsaved changes")); }
+
+function renderWatchlist() {
+  const opt = (label, k, hint) => h("div", {},
+    h("label", { class: "switch-row compact" },
+      h("input", { type: "checkbox", checked: !!wl[k], onchange: (e) => { wl[k] = e.target.checked; wlChanged(); } }),
+      h("span", {}, label)),
+    hint ? h("p", { class: "muted small", style: "margin:.2rem 0 0 1.7rem" }, hint) : null);
+  $("#wl-options").replaceChildren(
+    opt("Sync Plex watchlists to favorites", "enabled"),
+    opt("Run with every sync (including scheduled syncs)", "with_sync", "Otherwise it only runs from the buttons below."),
+    opt("Remove the favorite when a title leaves the watchlist", "remove",
+      "Only favorites this app added are removed. Favorites people set themselves are never touched."));
+
+  const box = $("#wl-links");
+  const targetsAvailable = favServers();
+  if (!wl.links.length) {
+    box.replaceChildren(h("p", { class: "empty" }, "No Plex accounts linked yet."));
+    return;
+  }
+  box.replaceChildren(...wl.links.map((link, li) => {
+    link.targets = link.targets || [];
+    const rows = link.targets.map((t, ti) => h("div", { class: "alias" },
+      selectField(null, t.server, ["", ...targetsAvailable], (v) => { t.server = v; t.user = ""; wlChanged(); renderWatchlist(); }, { noDirty: true }),
+      pickField(t.user, usersOf(t.server), (v) => { t.user = v; wlChanged(); },
+        { placeholder: "Username on that server", empty: t.server ? "— choose user —" : "— pick a server first —", noDirty: true }),
+      h("button", { class: "btn icon", title: "Remove", onclick: () => { link.targets.splice(ti, 1); wlChanged(); renderWatchlist(); } }, "✕")));
+    return h("div", { class: "item" },
+      h("div", { class: "item-head" },
+        h("span", { class: "badge", style: "--c: var(--plex)" }, "Plex"),
+        h("b", {}, link.plex_name),
+        !link.has_token ? h("span", { class: "bad small" }, "sign-in expired — link again") : null,
+        h("span", { style: "flex:1" }),
+        h("label", { class: "switch-row compact" },
+          h("input", { type: "checkbox", checked: link.enabled !== false, onchange: (e) => { link.enabled = e.target.checked; wlChanged(); } }),
+          h("span", { class: "small" }, "Enabled")),
+        h("button", { class: "btn icon", onclick: () => {
+          if (!confirm(`Unlink ${link.plex_name}? Favorites already added stay in place.`)) return;
+          wl.links.splice(li, 1); wlChanged(); renderWatchlist();
+        } }, "✕ Unlink")),
+      h("p", { class: "muted small", style: "margin:0 0 .5rem" }, "Add their watchlist to the favorites of:"),
+      rows.length ? rows : h("p", { class: "empty" }, targetsAvailable.length ? "No target yet." : "Add a Jellyfin or Emby server first."),
+      targetsAvailable.length ? h("button", { class: "btn ghost", onclick: () => {
+        link.targets.push({ server: targetsAvailable.length === 1 ? targetsAvailable[0] : "", user: "" });
+        wlChanged(); renderWatchlist();
+      } }, "+ Target user") : null);
+  }));
+}
+
+/** Pre-fill targets for a newly linked account from mappings or same-name users. */
+function guessTargets(plexName) {
+  const lower = (plexName || "").toLowerCase();
+  const plexServers = new Set(allServers().filter((x) => x.kind === "plex").map((x) => x.server.name));
+  const targets = [];
+  for (const m of cfg.user_mappings || []) {
+    const aliases = m.aliases || [];
+    const onPlex = aliases.some((a) => plexServers.has(a.server) && (a.username || "").toLowerCase() === lower)
+      || (m.canonical || "").toLowerCase() === lower;
+    if (!onPlex) continue;
+    for (const a of aliases) if (favServers().includes(a.server) && a.username) targets.push({ server: a.server, user: a.username });
+  }
+  if (!targets.length) for (const server of favServers()) {
+    const hit = usersOf(server).find((u) => u.toLowerCase() === lower);
+    if (hit) targets.push({ server, user: hit });
+  }
+  return targets;
+}
+
+async function linkWatchlistAccount() {
+  plexAbort = false;
+  const popup = appInfo.desktop ? null : window.open("about:blank", "_blank");
+  const status = h("p", {}, h("span", { class: "spinner" }), " Waiting for the person to sign in to Plex…");
+  const linkSlot = h("p", { class: "muted small" });
+  openModal(h("h2", {}, "Link a Plex account"),
+    h("p", { class: "muted" }, "Sign in with the Plex account whose watchlist you want to use. If it's someone else's, they can sign in on this screen."),
+    status, linkSlot,
+    h("div", { class: "modal-actions" }, h("button", { class: "btn", onclick: closeModal }, "Cancel")));
+  let pin;
+  try { pin = await api("/api/plex/pin", { method: "POST" }); }
+  catch (e) { if (popup) popup.close(); status.replaceChildren(h("span", { class: "bad" }, e.message)); return; }
+  if (appInfo.desktop) await api("/api/open", { method: "POST", body: { url: pin.url } }).catch(() => {});
+  else if (popup) popup.location = pin.url;
+  linkSlot.replaceChildren("Window didn't open? ", h("a", { href: pin.url, target: "_blank", rel: "noopener" }, "Open the Plex sign-in page"), ".");
+  const deadline = Date.now() + 10 * 60 * 1000;
+  while (!plexAbort && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2000));
+    if (plexAbort) return;
+    let res;
+    try { res = await api(`/api/watchlist/link/${pin.id}?code=${encodeURIComponent(pin.code)}`); } catch { continue; }
+    if (!res.done) continue;
+    if (popup && !popup.closed) try { popup.close(); } catch { /* ignore */ }
+    const keepTargets = Object.fromEntries(wl.links.map((l) => [l.id, l.targets]));
+    wl = res.watchlist;
+    for (const l of wl.links) if (keepTargets[l.id]) l.targets = keepTargets[l.id];
+    const link = wl.links.find((l) => l.plex_name === res.linked);
+    if (link && !link.targets.length) link.targets = guessTargets(link.plex_name);
+    if (!wl.enabled) wl.enabled = true;
+    closeModal();
+    await saveWatchlist(false);
+    toast(`Linked ${res.linked}'s Plex watchlist${link && link.targets.length ? "" : " — now choose whose favorites it fills"}.`, "ok");
+    return;
+  }
+  if (!plexAbort) status.replaceChildren(h("span", { class: "bad" }, "Timed out waiting for Plex sign-in. Try again."));
+}
+
+async function saveWatchlist(announce) {
+  try {
+    wl = await api("/api/watchlist", { method: "PUT", body: wl });
+    wlDirty = false;
+    renderWatchlist();
+    $("#wl-msg").replaceChildren(announce ? h("span", { class: "ok" }, "Saved ✓") : "");
+  } catch (e) { $("#wl-msg").replaceChildren(h("span", { class: "bad" }, e.message)); }
+}
+
+async function runWatchlist(dry) {
+  if (!dry && !confirm("Add watchlist titles to Jellyfin/Emby favorites now?")) return;
+  if (wlDirty) await saveWatchlist(false);
+  try {
+    logLines = []; renderLog();
+    await api("/api/watchlist/run", { method: "POST", body: { dryrun: dry } });
+    lastRunning = true;
+    switchTab("dashboard");
+    toast(dry ? "Previewing watchlists… results appear below when done." : "Syncing watchlists…");
+  } catch (e) { toast(e.message, "bad"); }
 }

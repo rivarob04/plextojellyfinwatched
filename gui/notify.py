@@ -60,14 +60,24 @@ def compose(run: dict) -> tuple[str, str, str]:
     elif status == "stopped":
         title, level = "JellyPlex-Watched: sync stopped", "warning"
     elif total:
-        verb = "would mark" if dry else "marked"
-        title, level = f"JellyPlex-Watched: {verb} {total} item{'s' if total != 1 else ''}", "success"
+        watch = summary.get("watched", 0) + summary.get("partial", 0)
+        favs = summary.get("favorite", 0)
+        parts = []
+        if watch:
+            parts.append(f"{'would mark' if dry else 'marked'} {watch} item{'s' if watch != 1 else ''}")
+        if favs:
+            parts.append(f"{'would add' if dry else 'added'} {favs} favorite{'s' if favs != 1 else ''}")
+        if not parts:
+            parts.append(f"{'would make' if dry else 'made'} {total} change{'s' if total != 1 else ''}")
+        title, level = "JellyPlex-Watched: " + ", ".join(parts), "success"
     else:
         title, level = "JellyPlex-Watched: no changes", "info"
 
     lines = [f"{mode} · {run.get('trigger', 'manual')} · {run.get('duration', '?')}"]
     if run.get("errors"):
         lines.append(f"{run['errors']} error line(s) in the log")
+    if summary.get("missing"):
+        lines.append(f"{summary['missing']} watchlist title(s) aren't in your library yet")
     if run.get("test"):
         lines = ["This is a test notification from JellyPlex-Watched."]
     for row in (summary.get("by_user") or [])[:10]:
@@ -76,6 +86,10 @@ def compose(run: dict) -> tuple[str, str, str]:
             parts.append(f"{row['watched']} watched")
         if row.get("partial"):
             parts.append(f"{row['partial']} in progress")
+        if row.get("favorite"):
+            parts.append(f"{row['favorite']} added to favorites")
+        if row.get("unfavorite"):
+            parts.append(f"{row['unfavorite']} removed from favorites")
         lines.append(f"• {row['user']} → {row['server']}: {', '.join(parts)}")
     extra = len(summary.get("by_user") or []) - 10
     if extra > 0:

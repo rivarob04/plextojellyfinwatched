@@ -39,6 +39,7 @@ STATE_PATH = Path(
 ).resolve()
 DISCOVERY_PATH = STATE_PATH.with_name("gui_discovery.json")
 RUNS_DIR = STATE_PATH.with_name("gui_runs")
+WATCHLIST_STATE = STATE_PATH.with_name("gui_watchlist_state.json")
 CHANGE_PREFIX = "@@JPW-CHANGE@@ "
 DESKTOP = os.environ.get("GUI_DESKTOP") == "1"
 GUI_PASSWORD = os.environ.get("GUI_PASSWORD", "")
@@ -208,20 +209,30 @@ def _child_env() -> dict:
 def summarize(changes: list[dict]) -> dict:
     """Totals per user + destination server, for the preview and notifications."""
     groups: dict[tuple[str, str], dict] = {}
+    missing = 0
     for c in changes:
+        kind = c.get("kind") or "watched"
+        if kind == "missing":
+            missing += 1
+            continue
         key = (c.get("user") or "?", c.get("server") or "?")
         row = groups.setdefault(
-            key, {"user": key[0], "server": key[1], "watched": 0, "partial": 0, "libraries": set()}
+            key,
+            {"user": key[0], "server": key[1], "watched": 0, "partial": 0,
+             "favorite": 0, "unfavorite": 0, "libraries": set()},
         )
-        row["partial" if c.get("kind") == "partial" else "watched"] += 1
+        row[kind if kind in row else "watched"] += 1
         row["libraries"].add(c.get("library") or "?")
-    rows = sorted(groups.values(), key=lambda r: -(r["watched"] + r["partial"]))
+    rows = sorted(groups.values(), key=lambda r: -(r["watched"] + r["partial"] + r["favorite"]))
     for row in rows:
         row["libraries"] = sorted(row["libraries"])
     return {
-        "total": len(changes),
+        "total": sum(r["watched"] + r["partial"] + r["favorite"] + r["unfavorite"] for r in rows),
         "watched": sum(r["watched"] for r in rows),
         "partial": sum(r["partial"] for r in rows),
+        "favorite": sum(r["favorite"] for r in rows),
+        "unfavorite": sum(r["unfavorite"] for r in rows),
+        "missing": missing,
         "by_user": rows,
     }
 
@@ -288,13 +299,45 @@ class Runner:
     def running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
-    def start(self, dryrun: bool | None, trigger: str) -> dict:
+    def watchlist_settings(self) -> dict:
+        wl = self.extra.setdefault("watchlist", {})
+        wl.setdefault("enabled", False)
+        wl.setdefault("with_sync", True)
+        wl.setdefault("remove", True)
+        wl.setdefault("links", [])
+        return wl
+
+    def _write_watchlist_spec(self) -> str | None:
+        wl = self.watchlist_settings()
+        links = [link for link in wl["links"] if link.get("enabled", True) and link.get("targets")]
+        if not wl["enabled"] or not links:
+            return None
+        spec = {"links": links, "remove": wl["remove"], "state_path": str(WATCHLIST_STATE)}
+        path = STATE_PATH.with_name(f".gui-watchlist-{secrets.token_hex(6)}.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(spec, fh)
+        return str(path)
+
+    def start(self, dryrun: bool | None, trigger: str, job: str | None = None) -> dict:
         with self.lock:
             if self.running:
                 raise HTTPException(409, "A sync is already running")
             if not CONFIG_PATH.exists():
                 raise HTTPException(400, "Save a configuration first")
-            args = ["run", "--config", str(CONFIG_PATH)]
+            wl = self.watchlist_settings()
+            if job is None:
+                job = "both" if wl["enabled"] and wl["with_sync"] else "sync"
+            spec = self._write_watchlist_spec() if job in ("both", "watchlist") else None
+            if job == "watchlist" and not spec:
+                raise HTTPException(400, "Turn on watchlist sync and link a Plex account with a target user first")
+            if job == "both" and not spec:
+                job = "sync"
+            self.spec_path = spec
+            args = ["run", "--config", str(CONFIG_PATH), "--job", job]
+            if spec:
+                args += ["--watchlist", spec]
             if dryrun is not None:
                 args += ["--dryrun", "true" if dryrun else "false"]
             self.base += len(self.lines)
@@ -307,6 +350,7 @@ class Runner:
                 "status": "running",
                 "errors": 0,
                 "marked": 0,
+                "job": job,
             }
             self.changes = []
             self.proc = subprocess.Popen(
@@ -336,7 +380,7 @@ class Runner:
                         continue
                     if len(self.changes) < 50000:
                         self.changes.append(change)
-                    if self.current:
+                    if self.current and change.get("kind") != "missing":
                         self.current["marked"] += 1
                         if self.current.get("dryrun") is None:
                             self.current["dryrun"] = change.get("dryrun")
@@ -345,6 +389,9 @@ class Runner:
                 if self.current and ("| ERROR" in line or "Startup error" in line):
                     self.current["errors"] += 1
         code = proc.wait()
+        if getattr(self, "spec_path", None):
+            Path(self.spec_path).unlink(missing_ok=True)
+            self.spec_path = None
         with self.lock:
             if not self.current:
                 return
@@ -709,6 +756,90 @@ def plex_pin_status(pin_id: int, code: str = ""):
             }
         )
     return {"done": True, "servers": servers}
+
+
+# ---- Plex watchlist -> favorites -----------------------------------------
+def public_watchlist() -> dict:
+    wl = runner.watchlist_settings()
+    return {
+        **{k: wl[k] for k in ("enabled", "with_sync", "remove")},
+        "links": [
+            {k: v for k, v in link.items() if k != "token"} | {"has_token": bool(link.get("token"))}
+            for link in wl["links"]
+        ],
+    }
+
+
+class WatchlistBody(BaseModel):
+    enabled: bool = False
+    with_sync: bool = True
+    remove: bool = True
+    links: list[dict] = []
+
+
+@app.get("/api/watchlist")
+def get_watchlist():
+    return public_watchlist()
+
+
+@app.put("/api/watchlist")
+def put_watchlist(body: WatchlistBody):
+    wl = runner.watchlist_settings()
+    tokens = {link["id"]: link.get("token") for link in wl["links"]}
+    links = []
+    for link in body.links:
+        if link.get("id") not in tokens:
+            continue  # links are only created through Plex sign-in
+        targets = [
+            {"server": t.get("server", ""), "user": t.get("user", "")}
+            for t in link.get("targets") or []
+            if t.get("server") or t.get("user")
+        ]
+        links.append(
+            {
+                "id": link["id"],
+                "plex_name": link.get("plex_name", ""),
+                "enabled": bool(link.get("enabled", True)),
+                "targets": targets,
+                "token": tokens[link["id"]],
+            }
+        )
+    wl.update(enabled=body.enabled, with_sync=body.with_sync, remove=body.remove, links=links)
+    runner._save_state()
+    return public_watchlist()
+
+
+@app.get("/api/watchlist/link/{pin_id}")
+def watchlist_link(pin_id: int, code: str = ""):
+    """Finish a Plex sign-in and store it as a linked watchlist account."""
+    pin = plex_call(
+        "GET", f"https://plex.tv/api/v2/pins/{pin_id}", headers=plex_headers(), params={"code": code}
+    )
+    token = pin.get("authToken")
+    if not token:
+        return {"done": False}
+    user = plex_call("GET", "https://plex.tv/api/v2/user", headers=plex_headers(token))
+    name = user.get("username") or user.get("title") or user.get("email") or "Plex account"
+    wl = runner.watchlist_settings()
+    existing = next((link for link in wl["links"] if link.get("plex_name") == name), None)
+    if existing:
+        existing["token"] = token
+        link = existing
+    else:
+        link = {"id": secrets.token_hex(6), "plex_name": name, "enabled": True,
+                "targets": [], "token": token}
+        wl["links"].append(link)
+    runner._save_state()
+    return {"done": True, "watchlist": public_watchlist(), "linked": name}
+
+
+class WatchlistRunBody(BaseModel):
+    dryrun: bool = True
+
+
+@app.post("/api/watchlist/run")
+def watchlist_run(body: WatchlistRunBody):
+    return runner.start(body.dryrun, "manual", job="watchlist")
 
 
 # ---- desktop app integration -----------------------------------------------

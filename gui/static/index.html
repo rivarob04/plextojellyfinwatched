@@ -29,6 +29,7 @@
     <button role="tab" data-tab="settings">Settings &amp; Filters</button>
     <button role="tab" data-tab="mappings">Mappings</button>
     <button role="tab" data-tab="rules">Sync Rules</button>
+    <button role="tab" data-tab="watchlist">Watchlist</button>
     <button role="tab" data-tab="notify">Notifications</button>
     <button role="tab" data-tab="yaml">YAML</button>
     <button role="tab" data-tab="marks">Marked</button>
@@ -168,6 +169,29 @@
         <div class="row between"><h2>Library sync rules</h2><button class="btn" id="add-lib-rule">+ Add rule</button></div>
         <p class="muted">Push these libraries from one server to another, overriding the library name and type filters for that direction. Use <code>*</code> for all libraries.</p>
         <div id="lib-rules"></div>
+      </div>
+    </section>
+
+    <!-- WATCHLIST -->
+    <section id="tab-watchlist" class="tab">
+      <div class="card">
+        <h2>Plex watchlist → Jellyfin / Emby favorites</h2>
+        <p class="muted">Anything on a person's Plex watchlist that's in your Jellyfin or Emby library is added to <b>their</b> favorites there (the ♥ row on the home screen). Titles you don't have yet are listed as <i>not in library</i>.</p>
+        <div id="wl-options" class="form"></div>
+      </div>
+      <div class="card">
+        <div class="row between">
+          <h2>Linked Plex accounts</h2>
+          <button class="btn plex" id="wl-link">+ Link a Plex account</button>
+        </div>
+        <p class="muted">Each person signs in with their own Plex account, because a watchlist belongs to the account, not your server. Plex Home <i>managed</i> users have no login of their own, so they can't be linked.</p>
+        <div id="wl-links"></div>
+      </div>
+      <div class="row gap wrap" style="margin-bottom:1rem">
+        <button class="btn primary" id="wl-save">Save watchlist settings</button>
+        <button class="btn" id="wl-preview">Preview (dry run)</button>
+        <button class="btn" id="wl-run">Sync watchlists now</button>
+        <span id="wl-msg" class="small"></span>
       </div>
     </section>
 

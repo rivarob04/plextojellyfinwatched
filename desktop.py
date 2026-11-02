@@ -293,8 +293,9 @@ def main() -> int:
         if status == "failed" and cfg.get("on_failure", True):
             toast("Sync failed", "Open JellyPlex-Watched to see the log.")
         elif status == "success" and total and (not run.get("dryrun") or cfg.get("include_dryrun")):
-            verb = "Would mark" if run.get("dryrun") else "Marked"
-            toast("Sync finished", f"{verb} {total} item{'s' if total != 1 else ''}.")
+            from gui.notify import compose
+
+            toast("Sync finished", compose(run)[0].replace("JellyPlex-Watched: ", "").capitalize() + ".")
 
     def run_now() -> None:
         try:

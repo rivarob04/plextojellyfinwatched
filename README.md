@@ -13,6 +13,7 @@ The sync engine (`src/`) is unchanged from upstream, so matching, mappings and r
 | **Settings & Filters** | Dry-run default, log level, threads, timeouts, GUID/path matching, and user / library / library-type white- and blacklists |
 | **Mappings** | Pick each server's real users and libraries from **dropdowns**, with **suggested matches** for people who have different names on different servers |
 | **Sync Rules** | Per-user and per-library direction overrides |
+| **Watchlist** | Each person links their Plex account; titles on their **Plex watchlist** become **favorites** in Jellyfin/Emby (and are removed again when they leave the watchlist — only favorites the app added). Titles you don't have are listed as *not in library* |
 | **Notifications** | Discord, ntfy, email or any webhook when a sync fails or marks things watched (plus Windows app tray options) |
 | **YAML** | Edit the raw `config.yaml` directly — form and file stay interchangeable |
 | **Marked** | Searchable list of every item that has been marked watched |
